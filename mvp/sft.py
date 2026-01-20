@@ -1,41 +1,55 @@
+import gc
+
 import torch
-from datasets import load_from_disk
+from datasets import load_dataset, load_from_disk
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl.trainer.sft_config import SFTConfig
 from trl.trainer.sft_trainer import SFTTrainer
 
-# ================= CONFIGURATION =================
-MODEL_ID = "google/gemma-3-1b-pt"
-TOKENIZER_ID = "google/gemma-3-1b-it"
-
-DATASET_PATH = "alpaca_gemma3_top10_subset.hf"
-OUTPUT_DIR = "gemma3-1b-alpaca-lora-4k-modern"
+# ================= GLOBAL CONFIGURATION =================
+MODEL_ID = "google/gemma-2-2b"
+TOKENIZER_ID = "google/gemma-2-9b-it"
 
 # Hyperparameters
-MAX_SEQ_LENGTH = 4096
+MAX_SEQ_LENGTH = 5000
 LEARNING_RATE = 2e-4
-# =================================================
+SEED = 42
+
+MAX_ORIGINAL_SAMPLES = 1000
+# ========================================================
 
 
-def main():
-    print(f"Loading Dataset from {DATASET_PATH}...")
-    dataset = load_from_disk(DATASET_PATH)
+def format_to_conversation(sample):
+    user_prompt = sample["instruction"]
+    if sample.get("input", ""):
+        user_prompt += f"\n{sample['input']}"
 
-    # 1. Chat Formatting (Standard Messages Format)
-    # TRL expects a list of dictionaries with "role" and "content"
-    def format_to_conversation(sample):
-        user_prompt = sample["instruction"]
-        if sample["input"]:
-            user_prompt += f"\n{sample['input']}"
+    return {
+        "messages": [
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": sample["output"]},
+        ]
+    }
 
-        return {
-            "messages": [
-                {"role": "user", "content": user_prompt},
-                {"role": "model", "content": sample["output"]},
-            ]
-        }
 
+def train_run(dataset_path, output_dir, is_local=False, max_samples=None):
+    print(f"\n{'=' * 20} STARTING RUN: {output_dir} {'=' * 20}")
+
+    # 1. Load Dataset
+    print(f"Loading Dataset from: {dataset_path}...")
+    if is_local:
+        dataset = load_from_disk(dataset_path)
+    else:
+        dataset = load_dataset(dataset_path, split="train")
+
+    # NEW: Apply sample limit if specified
+    if max_samples is not None and max_samples < len(dataset):
+        print(f"Limiting dataset to {max_samples} samples...")
+        # We select the first N samples to maintain reproducibility
+        dataset = dataset.select(range(max_samples))
+
+    print(f"Final dataset size: {len(dataset)}")
     print("Formatting dataset to 'messages'...")
     dataset = dataset.map(format_to_conversation, remove_columns=dataset.column_names)
 
@@ -44,13 +58,12 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
     tokenizer.padding_side = "right"
 
-    # 3. Model Loading (High Performance BF16)
+    # 3. Model Loading
     print(f"Loading Model: {MODEL_ID}...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         device_map="auto",
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
     )
 
     # 4. LoRA Configuration
@@ -71,49 +84,71 @@ def main():
         ],
     )
 
-    # 5. Training Configuration (Replaces DataCollator)
-    # - assistant_only_loss=True: Replaces DataCollatorForCompletionOnlyLM
-    # - dataset_kwargs: Ensures TRL doesn't try to add special tokens twice
+    # 5. Training Configuration
     training_args = SFTConfig(
-        output_dir=OUTPUT_DIR,
-        # --- The New Masking Method ---
-        dataset_text_field="messages",  # Tells TRL to look for the 'messages' column
-        assistant_only_loss=True,  # Automatically masks User turns (loss=0)
+        output_dir=output_dir,
+        dataset_text_field="messages",
         max_length=MAX_SEQ_LENGTH,
-        # Optimization for 192GB VRAM
         num_train_epochs=1,
-        per_device_train_batch_size=16,
+        per_device_train_batch_size=8,
         gradient_accumulation_steps=1,
-        gradient_checkpointing=False,  # Speed up training (uses more VRAM)
         learning_rate=LEARNING_RATE,
         weight_decay=0.01,
         max_grad_norm=0.3,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
-        # Precision
-        fp16=False,
         bf16=True,
-        # Logging
         logging_steps=10,
         save_strategy="epoch",
         report_to="none",
+        seed=SEED,
+        data_seed=SEED,
     )
 
-    print("Starting Training (Modern TRL Workflow)...")
+    print(f"Starting Training for {output_dir}...")
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
         peft_config=peft_config,
         processing_class=tokenizer,
-        # Note: No data_collator passed here; SFTTrainer handles it internally
     )
 
     trainer.train()
 
-    print(f"Saving Adapter to {OUTPUT_DIR}...")
-    trainer.save_model(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
+    print(f"Saving Adapter to {output_dir}...")
+    trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+    # Cleanup
+    del model
+    del trainer
+    del tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    return
+
+
+def main():
+    # --- RUN 1: Local Subset ---
+    # Usually, a local subset is already small, so we pass None for max_samples
+    train_run(
+        dataset_path="alpaca_gemma2_top20_subset.hf",
+        output_dir="gemma2-2b-alpaca-subset-lora",
+        is_local=True,
+        max_samples=None,
+    )
+
+    # --- RUN 2: Original Cleaned Alpaca ---
+    # Here we apply the limit defined in global config
+    train_run(
+        dataset_path="yahma/alpaca-cleaned",
+        output_dir="gemma2-2b-alpaca-cleaned-lora",
+        is_local=False,
+        max_samples=MAX_ORIGINAL_SAMPLES,
+    )
+
+    print("All training runs completed successfully.")
 
 
 if __name__ == "__main__":
