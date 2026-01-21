@@ -12,16 +12,16 @@ prune:
   sae_id: "layer_20/width_16k/average_l0_91"
   dataset_id: "yahma/alpaca-cleaned"
   batch_size: 8
-  max_length: &len 10  # 4750
-  num_samples: 1  # 1000
-  top_k_features: [20]
-  prune_thresholds: [10.0, 25.0, 50.0]
+  max_length: &len 4750
+  num_samples: &samples 5000
+  top_k_features: [60]
+  prune_thresholds: [1.0, 5.0, 10.0, 25.0, 50.0, 75.0]
 sft:
   max_seq_length: *len
   learning_rate: 0.0002
   seed: 3
-  max_original_samples: 1  # 1000
-  batch_size: 1  # 4
+  max_original_samples: *samples
+  batch_size: 4
 eval:
-  num_samples: 1  # 300
-  max_new_tokens: 10  # 512
+  num_samples: 1000
+  max_new_tokens: 512
