@@ -1,0 +1,27 @@
+
+# Experiment configuration for MVP pipeline
+# Adjust values as needed for your experiment sweep
+suite_title: "mvp"
+output_dir: "experiments"
+
+base_model_id: "google/gemma-2-2b"
+tokenizer_id: "google/gemma-2-9b-it"
+prune:
+  model_id: "google/gemma-2-9b-it"
+  sae_release: "gemma-scope-9b-it-res"
+  sae_id: "layer_20/width_16k/average_l0_91"
+  dataset_id: "yahma/alpaca-cleaned"
+  batch_size: 8
+  max_length: &len 10  # 4750
+  num_samples: 1  # 1000
+  top_k_features: [20]
+  prune_thresholds: [10.0, 25.0, 50.0]
+sft:
+  max_seq_length: *len
+  learning_rate: 0.0002
+  seed: 3
+  max_original_samples: 1  # 1000
+  batch_size: 1  # 4
+eval:
+  num_samples: 1  # 300
+  max_new_tokens: 10  # 512

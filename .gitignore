@@ -11,3 +11,5 @@ wheels/
 
 # mvp models and datasets
 mvp/*gemma*
+results/
+experiments/
