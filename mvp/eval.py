@@ -28,7 +28,7 @@ def eval_and_save(
     from mvp.utils.experiment_helpers import config_hash, ensure_dir
 
     ensure_dir(out_dir)
-    datasets_map = load_eval_datasets(limit=config.eval.num_samples)
+    datasets_map = load_eval_datasets(seed=config.seed, limit=config.eval.num_samples)
     rouge = evaluate.load("rouge")
     batch_size = getattr(config.eval, "batch_size", 4)
     model_scores = {}
@@ -100,7 +100,7 @@ def eval_and_save(
 
 
 # ================= DATASET LOADERS =================
-def load_eval_datasets(limit=None):
+def load_eval_datasets(seed: int, limit=None):
     """
     Loads and normalizes 5 instruction datasets into a standard format:
     [{'prompt': str, 'reference': str, 'source': str}, ...]
@@ -112,8 +112,9 @@ def load_eval_datasets(limit=None):
     # No official test split, so we take a random slice from the end
     print(" - Loading Dolly-15k...")
     ds = load_dataset("databricks/databricks-dolly-15k", split="train")
-    ds = ds.select(range(len(ds) - 1000, len(ds)))  # Take last 1000 as pseudo-test
-    if limit:
+    ds = ds.shuffle(seed=seed)
+    # ds = ds.select(range(len(ds) - 1000, len(ds)))  # Take last 1000 as pseudo-test
+    if limit and limit < len(ds):
         ds = ds.select(range(limit))
 
     eval_data["DollyEval"] = [
@@ -124,9 +125,14 @@ def load_eval_datasets(limit=None):
         for row in ds
     ]
 
+    # 2. Self-Instruct (human_eval subset
     print(" - Loading Self-Instruct...")
-    ds = load_dataset("yizhongw/self_instruct", subset="human_eval", split="test")
-    if limit:
+    ds = load_dataset(
+        "HuggingFaceH4/self-instruct-eval",
+        split="test",
+    )
+    ds = ds.shuffle(seed=seed)
+    if limit and limit < len(ds):
         ds = ds.select(range(limit))
 
     eval_data["SelfInst"] = [
@@ -134,8 +140,8 @@ def load_eval_datasets(limit=None):
             "prompt": "Instruction: "
             + row["instruction"]
             + "\nInput: "
-            + row["instances"]["input"],
-            "reference": "Output: " + row["instances"]["output"],
+            + row["instances"][0]["input"],
+            "reference": "Output: " + row["instances"][0]["output"],
         }
         for row in ds
     ]
@@ -143,6 +149,7 @@ def load_eval_datasets(limit=None):
     # 3. Vicuna Eval (Using GPT-4 answers as reference for Rouge)
     print(" - Loading Vicuna Eval...")
     ds = load_dataset("zhengxuanzenwu/vicuna-eval-with-gpt4", split="test")
+    ds = ds.shuffle(seed=seed)
     if limit and limit < len(ds):
         ds = ds.select(range(limit))
 
@@ -156,28 +163,25 @@ def load_eval_datasets(limit=None):
 
     # 4. Super-NaturalInstructions (S-NI)
     print(" - Loading Super-NaturalInstructions (S-NI)...")
-    # Using a core subset to avoid downloading 100GB
     ds = load_dataset(
-        "yizhongw/self_instruct", subset="super_natural_instructions", split="test"
-    )  # Proxy for diverse instructions
-    if limit:
+        "Muennighoff/natural-instructions",
+        revision="refs/convert/parquet",
+        split="default",
+        data_files={"default": "default/validation/*.parquet"},
+    )
+    ds = ds.shuffle(seed=seed)
+    if limit and limit < len(ds):
         ds = ds.select(range(limit))
 
     eval_data["S-NI"] = [
-        {"prompt": row["prompt"], "reference": row["completion"]} for row in ds
-    ]
-
-    # 5. P3
-    print(" - Loading P3...")
-    # Using a core subset to avoid downloading 100GB
-    ds = load_dataset(
-        "yizhongw/self_instruct", subset="p3", split="train"
-    )  # Proxy for diverse instructions
-    if limit:
-        ds = ds.select(range(limit))
-
-    eval_data["P3"] = [
-        {"prompt": row["prompt"], "reference": row["completion"]} for row in ds
+        {
+            "prompt": "Instruction: "
+            + row["definition"]
+            + "\nPassage: "
+            + row["inputs"],
+            "reference": row["targets"],
+        }
+        for row in ds
     ]
 
     return eval_data

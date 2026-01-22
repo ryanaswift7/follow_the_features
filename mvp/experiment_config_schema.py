@@ -18,7 +18,6 @@ class PruneConfig(BaseModel):
 class SFTConfig(BaseModel):
     max_seq_length: int
     learning_rate: float
-    seed: int
     max_original_samples: int
     batch_size: int
 
@@ -26,6 +25,7 @@ class SFTConfig(BaseModel):
 class EvalConfig(BaseModel):
     num_samples: int
     max_new_tokens: int
+    batch_size: int
 
 
 class ExperimentConfig(BaseModel):
@@ -36,6 +36,7 @@ class ExperimentConfig(BaseModel):
     sft: SFTConfig
     eval: EvalConfig
     output_dir: str
+    seed: int
 
     @staticmethod
     def from_yaml(path: str) -> "ExperimentConfig":

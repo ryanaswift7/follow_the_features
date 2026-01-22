@@ -40,7 +40,7 @@ def sft_run(config, dataset_path, output_dir):
     tokenizer_id = config.tokenizer_id
     max_seq_length = config.sft.max_seq_length
     learning_rate = config.sft.learning_rate
-    seed = config.sft.seed
+    seed = config.seed
     # Load dataset
     dataset = load_from_disk(dataset_path)
     dataset = dataset.map(format_to_conversation, remove_columns=dataset.column_names)

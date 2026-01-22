@@ -20,5 +20,8 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 
+[tool.uv]
+package = true
+
 [project.scripts]
 mvp = "mvp.main:main"
