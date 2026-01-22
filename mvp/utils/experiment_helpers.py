@@ -200,16 +200,20 @@ def plot_experiment_results(results, output_dir):
                     assert score is not None, (
                         f"Baseline for model {model_name} missing average_eval_score"
                     )
+                    line_style = "dashed" if "-it" in model_name else "dotted"
+
                     plt.axhline(
-                        y=score,  # The Y value
-                        color="gray",  # Use 'color' instead of 'colors'
-                        linestyle="dashed",
+                        y=score,
+                        color="gray",
+                        linestyle=line_style,
                         label=f"{model_name} (baseline)",
                     )
+
         plt.xlabel("Dataset Size")
         plt.ylabel("Average ROUGE-L")
         plt.title("Average ROUGE-L vs Dataset Size")
-        plt.legend()
+        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
         plt.savefig(os.path.join(plots_dir, "average.png"))
         plt.close()
 
@@ -272,16 +276,19 @@ def plot_experiment_results(results, output_dir):
                     assert score is not None, (
                         f"Baseline for model {model_name} missing score for {ds}"
                     )
+                    line_style = "dashed" if "-it" in model_name else "dotted"
+
                     plt.axhline(
                         y=score,
                         color="gray",
-                        linestyle="dashed",
+                        linestyle=line_style,
                         label=f"{model_name} (baseline)",
                     )
         plt.xlabel("Dataset Size")
         plt.ylabel("ROUGE-L")
         plt.title(f"ROUGE-L vs Dataset Size for {ds}")
-        plt.legend()
+        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
         plt.savefig(os.path.join(plots_dir, f"{ds}.png"))
         plt.close()
 

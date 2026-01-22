@@ -21,7 +21,7 @@ sft:
   learning_rate: 0.0002
   seed: 3
   max_original_samples: *samples
-  batch_size: 4
+  batch_size: 2
 eval:
-  num_samples: 1000
+  num_samples: 300
   max_new_tokens: 512

@@ -13,3 +13,6 @@ wheels/
 mvp/*gemma*
 results/
 experiments/
+
+# vscode settings
+.vscode/

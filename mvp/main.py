@@ -68,6 +68,11 @@ def run_experiments(config):
         )
     for top_k in config.prune.top_k_features:
         for threshold in config.prune.prune_thresholds:
+            if threshold >= 45.0:
+                print(
+                    f"[SKIP] Skipping top_k={top_k}, threshold={threshold} due to high threshold."
+                )
+                continue
             print(f"[EXPERIMENT] Processing top_k={top_k}, threshold={threshold}")
             (
                 _results_dir,

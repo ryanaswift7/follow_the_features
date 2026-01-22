@@ -124,15 +124,20 @@ def load_eval_datasets(limit=None):
         for row in ds
     ]
 
-    # 2. Self-Instruct (Using a HF mirror of the eval set)
     print(" - Loading Self-Instruct...")
-    # Using the 'eval' set often found in cleaned versions or the user-oriented set
-    ds = load_dataset("HuggingFaceH4/instruction-dataset", split="test")
+    ds = load_dataset("yizhongw/self_instruct", subset="human_eval", split="test")
     if limit:
         ds = ds.select(range(limit))
 
     eval_data["SelfInst"] = [
-        {"prompt": row["prompt"], "reference": row["completion"]} for row in ds
+        {
+            "prompt": "Instruction: "
+            + row["instruction"]
+            + "\nInput: "
+            + row["instances"]["input"],
+            "reference": "Output: " + row["instances"]["output"],
+        }
+        for row in ds
     ]
 
     # 3. Vicuna Eval (Using GPT-4 answers as reference for Rouge)
@@ -149,44 +154,31 @@ def load_eval_datasets(limit=None):
         for row in ds
     ]
 
-    # # 4. Super-NaturalInstructions (S-NI)
-    # print(" - Loading Super-NaturalInstructions (S-NI)...")
-    # # Using a core subset to avoid downloading 100GB
-    # ds = load_dataset(
-    #     "mrm8488/unnatural-instructions-core", split="train"
-    # )  # Proxy for diverse instructions
-    # if limit:
-    #     ds = ds.select(range(limit))
+    # 4. Super-NaturalInstructions (S-NI)
+    print(" - Loading Super-NaturalInstructions (S-NI)...")
+    # Using a core subset to avoid downloading 100GB
+    ds = load_dataset(
+        "yizhongw/self_instruct", subset="super_natural_instructions", split="test"
+    )  # Proxy for diverse instructions
+    if limit:
+        ds = ds.select(range(limit))
 
-    # eval_data["S-NI"] = [
-    #     {"prompt": row["instruction_with_input"], "reference": row["output"]}
-    #     for row in ds
-    # ]
+    eval_data["S-NI"] = [
+        {"prompt": row["prompt"], "reference": row["completion"]} for row in ds
+    ]
 
-    # # 5. Unnatural Instructions (UnNI)
-    # print(" - Loading Unnatural Instructions...")
-    # # We reuse the core dataset above but filter for the 'unnatural' flavor or load a specific subset
-    # # Since 'unnatural-instructions-core' is often used for both, we will load a different subset
-    # # or strictly the 'sequences' if available. Here we load a specific unnatural proxy.
-    # try:
-    #     ds = load_dataset(
-    #         "fka/awesome-chatgpt-prompts", split="train"
-    #     )  # High quality "unnatural" creative prompts
-    #     if limit:
-    #         ds = ds.select(range(limit))
-    #     eval_data["UnNI"] = [
-    #         {"prompt": row["prompt"], "reference": "N/A - Creative"} for row in ds
-    #     ]
-    #     # NOTE: UnNI usually doesn't have fixed answers (creative).
-    #     # For Rouge, we need ground truth. Reverting to a dataset with answers:
-    #     ds = load_dataset("truthful_qa", "generation", split="validation")
-    #     if limit:
-    #         ds = ds.select(range(limit))
-    #     eval_data["UnNI (Proxy:TQA)"] = [
-    #         {"prompt": row["question"], "reference": row["best_answer"]} for row in ds
-    #     ]
-    # except:
-    #     print(" ! Could not load UnNI proxy, skipping.")
+    # 5. P3
+    print(" - Loading P3...")
+    # Using a core subset to avoid downloading 100GB
+    ds = load_dataset(
+        "yizhongw/self_instruct", subset="p3", split="train"
+    )  # Proxy for diverse instructions
+    if limit:
+        ds = ds.select(range(limit))
+
+    eval_data["P3"] = [
+        {"prompt": row["prompt"], "reference": row["completion"]} for row in ds
+    ]
 
     return eval_data
 
