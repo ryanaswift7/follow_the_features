@@ -1,0 +1,31 @@
+title: "base"
+output_dir: "experiments"
+seed: 3
+prune:
+  cfg:
+    model_id: &supervisor "google/gemma-2-9b-it"
+    sae_release: "gemma-scope-9b-it-res"
+    sae_id: "layer_20/width_16k/average_l0_91"
+    dataset_id: "yahma/alpaca-cleaned"
+    num_samples: &samples 10000
+    seq_agg_method: "sum"  # possible values: "sum", "mean", "max"
+    feat_agg_method: "sum"  # possible values: "sum", "mean"
+  params:
+    batch_size: 16
+    dataset_sizes: [2000, 4000, 6000, 8000, 10000]
+    topk_features: [30, 60, 90]
+sft:
+  cfg:
+    tokenizer_id: *supervisor
+    base_model_id: "google/gemma-2-2b"
+    max_seq_length: 4750
+    learning_rate: 0.0002
+    max_original_samples: *samples
+  params:
+    batch_size: 4
+eval:
+  cfg:
+    num_samples: 300
+    max_new_tokens: 256
+  params:
+    batch_size:  32

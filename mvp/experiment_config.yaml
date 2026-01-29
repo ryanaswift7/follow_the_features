@@ -11,11 +11,11 @@ prune:
   sae_release: "gemma-scope-9b-it-res"
   sae_id: "layer_20/width_16k/average_l0_91"
   dataset_id: "yahma/alpaca-cleaned"
-  batch_size: 8
+  batch_size: 200
   max_length: &len 4750
   num_samples: &samples 10000
   top_k_features: [60]
-  prune_thresholds: [0.0, 10.0, 15.0, 20.0, 25.0]
+  prune_thresholds: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
 sft:
   max_seq_length: *len
   learning_rate: 0.0002
@@ -23,5 +23,5 @@ sft:
   batch_size: 16
 eval:
   num_samples: 1000
-  max_new_tokens: 1024
-  batch_size:  24
+  max_new_tokens: 512
+  batch_size:  128

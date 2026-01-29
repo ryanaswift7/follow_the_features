@@ -25,3 +25,4 @@ package = true
 
 [project.scripts]
 mvp = "mvp.main:main"
+fdp = "src.main:main"

@@ -1,0 +1,31 @@
+title: "debug"
+output_dir: "experiments"
+seed: 3
+prune:
+  cfg:
+    model_id: &supervisor "google/gemma-2-9b-it"
+    sae_release: "gemma-scope-9b-it-res"
+    sae_id: "layer_20/width_16k/average_l0_91"
+    dataset_id: "yahma/alpaca-cleaned"
+    num_samples: &samples 10
+    seq_agg_method: "sum"  # possible values: "sum", "mean", "max"
+    feat_agg_method: "sum"  # possible values: "sum", "mean"
+  params:
+    batch_size: 2
+    dataset_sizes: [2, 4]
+    topk_features: [3, 6]
+sft:
+  cfg:
+    tokenizer_id: *supervisor
+    base_model_id: "google/gemma-2-2b"
+    max_seq_length: 8
+    learning_rate: 0.0002
+    max_original_samples: *samples
+  params:
+    batch_size: 2
+eval:
+  cfg:
+    num_samples: 10
+    max_new_tokens: 8
+  params:
+    batch_size:  2

@@ -28,6 +28,7 @@ def prune_run(config, top_k_features, prune_threshold, output_path):
     batch_size = config.prune.batch_size
     max_length = config.prune.max_length
     num_samples = config.prune.num_samples
+    batch_size = config.prune.batch_size
 
     print(f"--- Prune: top_k={top_k_features}, threshold={prune_threshold} ---")
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_id)
@@ -53,7 +54,7 @@ def prune_run(config, top_k_features, prune_threshold, output_path):
             formatted_texts.append(text)
         return {"formatted_text": formatted_texts}
 
-    dataset = dataset.map(apply_chat_formatting, batched=True, batch_size=1000)
+    dataset = dataset.map(apply_chat_formatting, batched=True, batch_size=batch_size)
 
     feature_activity = torch.zeros(sae.cfg.d_sae, device="cpu")
     hook_name = sae.cfg.metadata.hook_name

@@ -1,5 +1,182 @@
+import argparse
+import json
+
+from src.eval import run_baseline_evals, run_eval
+from src.prune import run_prune
+from src.sft import run_sft
+from src.suite_cfg_schema import SuiteConfig
+from src.utils.analysis import aggregate_results, plot_experiment_results
+from src.utils.constants import (
+    EVAL_CONFIG_FILENAME,
+    EVAL_ID_KEY,
+    EVAL_RESULTS_FILENAME,
+    EVAL_RESULTS_KEY,
+    MODEL_EXISTENCE_FILENAME,
+    PRUNE_ID_KEY,
+    SFT_ID_KEY,
+)
+from src.utils.enums import ModelType
+
+
+def run_experiments(suite: SuiteConfig):
+    print(f"[RUN] Starting experiment sweep for suite: {suite.title}")
+
+    # Step 1: Baselines
+    base_model_eval_results_path = suite.dirs.base_model_eval / EVAL_RESULTS_FILENAME
+    base_model_eval_cfg_path = suite.dirs.base_model_eval / EVAL_CONFIG_FILENAME
+
+    supervisor_model_eval_results_path = (
+        suite.dirs.supervisor_model_eval / EVAL_RESULTS_FILENAME
+    )
+    supervisor_model_eval_cfg_path = (
+        suite.dirs.supervisor_model_eval / EVAL_CONFIG_FILENAME
+    )
+    baseline_valid = False
+    if (
+        base_model_eval_results_path.exists()
+        and supervisor_model_eval_results_path.exists()
+    ):
+        try:
+            # base model
+            with open(base_model_eval_results_path, "r") as f:
+                base_model_results = json.load(f)
+            with open(base_model_eval_cfg_path, "r") as f:
+                base_model_eval_cfg = json.load(f)
+
+            base_model_scores = base_model_results.get(EVAL_RESULTS_KEY)
+            base_model_valid = (
+                base_model_scores
+                and base_model_eval_cfg.get(EVAL_ID_KEY) == suite.ids.eval
+            )
+
+            # supervisor model
+            with open(supervisor_model_eval_results_path, "r") as f:
+                supervisor_results = json.load(f)
+            with open(supervisor_model_eval_cfg_path, "r") as f:
+                supervisor_eval_cfg = json.load(f)
+            supervisor_model_scores = supervisor_results.get(EVAL_RESULTS_KEY)
+            supervisor_model_valid = (
+                supervisor_model_scores
+                and supervisor_eval_cfg.get(EVAL_ID_KEY) == suite.ids.eval
+            )
+
+            baseline_valid = base_model_valid and supervisor_model_valid
+        except Exception as e:
+            print(
+                f"[BASELINE] Error reading baseline results: {e}. Will re-run baselines."
+            )
+            baseline_valid = False
+    if not baseline_valid:
+        print("[BASELINE] Running baseline evaluations...")
+        run_baseline_evals(suite)
+    else:
+        print(
+            "[BASELINE] Baseline results with matching eval config found, skipping baseline evals."
+        )
+
+    # Step 2: Prune, SFT, Eval loop
+    prune_id_match = False
+    sft_id_match = False
+    eval_id_match = False
+    for k in suite.prune.params.topk_features:
+        for n in suite.prune.params.dataset_sizes:
+            print(f"[EXPERIMENT] Processing dataset size: {n}, top-k features: {k}")
+
+            eval_results_path = (
+                suite.dirs.get_trained_model_eval(dataset_size=n, topk=k)
+                / EVAL_RESULTS_FILENAME
+            )
+            eval_config_path = (
+                suite.dirs.get_trained_model_eval(dataset_size=n, topk=k)
+                / EVAL_CONFIG_FILENAME
+            )
+            need_eval = True
+            if eval_results_path.exists() and eval_config_path.exists():
+                with open(eval_results_path, "r") as f:
+                    results = json.load(f)
+                with open(eval_config_path, "r") as f:
+                    cfg = json.load(f)
+                prune_id_match = cfg.get(PRUNE_ID_KEY) == suite.ids.prune
+                sft_id_match = cfg.get(SFT_ID_KEY) == suite.ids.sft
+                eval_id_match = cfg.get(EVAL_ID_KEY) == suite.ids.eval
+                all_id_match = prune_id_match and sft_id_match and eval_id_match
+                if all_id_match and results.get(EVAL_RESULTS_KEY) is not None:
+                    need_eval = False
+                    # print(
+                    #     f"[SKIP] All outputs exist for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name} and config hashes match, skipping."
+                    # )
+            if need_eval:
+                print(
+                    f"[MISSING] Results missing or config hashes do not match for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Will run necessary steps."
+                )
+                need_prune = not (
+                    suite.dirs.get_dataset_path(dataset_size=n, topk=k).exists()
+                    and prune_id_match
+                )
+                model_exists = (
+                    suite.dirs.get_trained_model_root(dataset_size=n, topk=k)
+                    / MODEL_EXISTENCE_FILENAME
+                ).exists()
+                need_sft = not (model_exists and sft_id_match)
+                if need_prune:
+                    print(
+                        f"[MISSING] Dataset missing for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Running dataset pruning..."
+                    )
+                    run_prune(suite=suite, dataset_size=n, topk=k)
+                else:
+                    print(
+                        f"[FOUND] Dataset exists for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}."
+                    )
+
+                if need_sft:
+                    print(
+                        f"[MISSING] Model missing for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Running SFT..."
+                    )
+                    run_sft(suite=suite, dataset_size=n, topk=k)
+                else:
+                    print(
+                        f"[FOUND] Model exists for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}."
+                    )
+                print(
+                    f"[EVAL] Running evaluation for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}..."
+                )
+                run_eval(
+                    suite=suite,
+                    model_type=ModelType.ADAPTER,
+                    dataset_size=n,
+                    topk=k,
+                )
+            else:
+                print(
+                    f"[FOUND] Results exist for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name} and config hashes match."
+                )
+    return
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run experiment suite based on configuration file."
+    )
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=str,
+        default="configs/base.yaml",
+        help="Path to the experiment configuration YAML file (default: 'configs/base.yaml').",
+    )
+    return parser.parse_args()
+
+
 def main():
-    print("Hello from feature-data-pruning!")
+    args = parse_args()
+    config_path = args.config
+    suite = SuiteConfig.from_yaml(config_path)
+    run_experiments(suite)
+
+    # At the end, reload all results to ensure aggregation is complete
+    all_results_df = aggregate_results(suite=suite)
+    plot_experiment_results(original_df=all_results_df, suite=suite)
+    print("[DONE] All experiments complete.")
 
 
 if __name__ == "__main__":
