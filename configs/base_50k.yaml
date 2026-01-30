@@ -22,7 +22,7 @@ sft:
     learning_rate: 0.0002
     max_original_samples: *samples
   params:
-    batch_size: 4
+    batch_size: 2
 eval:
   cfg:
     num_samples: 300
