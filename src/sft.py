@@ -39,7 +39,6 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     dataset = load_from_disk(dataset_path)
     dataset = dataset.map(format_to_conversation, remove_columns=dataset.column_names)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
-    tokenizer.padding_side = "right"
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto", torch_dtype=torch.bfloat16
     )

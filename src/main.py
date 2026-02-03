@@ -16,6 +16,7 @@ from src.utils.constants import (
     SFT_ID_KEY,
 )
 from src.utils.enums import ModelType
+from utils.reproducibility import enforce_reproducibility
 
 
 def run_experiments(suite: SuiteConfig):
@@ -170,7 +171,10 @@ def parse_args():
 def main():
     args = parse_args()
     config_path = args.config
+
     suite = SuiteConfig.from_yaml(config_path)
+    enforce_reproducibility(seed=suite.seed)
+
     run_experiments(suite)
 
     # At the end, reload all results to ensure aggregation is complete

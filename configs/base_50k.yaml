@@ -22,10 +22,10 @@ sft:
     learning_rate: 0.0002
     max_original_samples: *samples
   params:
-    batch_size: 2
+    batch_size: 4
 eval:
   cfg:
     num_samples: 300
     max_new_tokens: 256
   params:
-    batch_size:  32
+    batch_size:  64
