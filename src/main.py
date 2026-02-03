@@ -16,7 +16,7 @@ from src.utils.constants import (
     SFT_ID_KEY,
 )
 from src.utils.enums import ModelType
-from utils.reproducibility import enforce_reproducibility
+from src.utils.reproducibility import enforce_reproducibility
 
 
 def run_experiments(suite: SuiteConfig):

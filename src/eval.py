@@ -21,7 +21,6 @@ from src.utils.constants import (
 from src.utils.enums import ModelType
 
 
-# TODO: fix model loading double adapters
 # Unified eval_and_save function for both baseline and trained model evals
 def eval_and_save(
     model,
