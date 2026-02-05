@@ -170,6 +170,8 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig):
             f.write(f"# Experiment Summary: Top-{k} Features\n\n")
             f.write(final_table.to_markdown(index=False, floatfmt=".4f"))
 
+        final_table.to_parquet(table_path / "summary_report.parquet")
+
     print(
         f"[PLOT] Completed. Subdirectories created for: {', '.join(map(str, topk_values))}"
     )
