@@ -49,6 +49,7 @@ class SFTSetup(BaseModel):
 class EvalConfig(BaseModel):
     num_samples: int
     max_new_tokens: int
+    ollama_judge: str
 
 
 class EvalParams(BaseModel):

@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from src.suite_cfg_schema import SuiteConfig
-from src.utils.constants import EVAL_RESULTS_FILENAME, NA_RESULT_STR
+from src.utils.constants import EVAL_RESULTS_FILENAME, NAN_RESULT
 from src.utils.enums import ModelType
 
 
@@ -33,8 +33,8 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
         base_data.update(
             {
                 "model_type": ModelType.BASE.value,
-                "topk_features": NA_RESULT_STR,
-                "dataset_size": NA_RESULT_STR,
+                "topk_features": NAN_RESULT,
+                "dataset_size": NAN_RESULT,
             }
         )
         rows.append(base_data)
@@ -45,8 +45,8 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
         sup_data.update(
             {
                 "model_type": ModelType.SUPERVISOR.value,
-                "topk_features": NA_RESULT_STR,
-                "dataset_size": NA_RESULT_STR,
+                "topk_features": NAN_RESULT,
+                "dataset_size": NAN_RESULT,
             }
         )
         rows.append(sup_data)
@@ -89,7 +89,7 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig):
     baseline_df = df[df["model_type"] != ModelType.ADAPTER.value].copy()
 
     # 3. Get unique Top-K values (ignoring the "Baseline" label)
-    topk_values = [k for k in df["topk_features"].unique() if k != NA_RESULT_STR]
+    topk_values = [k for k in df["topk_features"].unique() if k != NAN_RESULT]
 
     for k in topk_values:
         # Create a specific DataFrame for the current Top-K trained models
@@ -163,7 +163,7 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig):
         # Formatting: Change '0' dataset size to 'N/A' for baselines
         final_table.loc[
             final_table["model_type"] != ModelType.ADAPTER.value, "dataset_size"
-        ] = NA_RESULT_STR
+        ] = NAN_RESULT
 
         # Save as Markdown
         with open(table_path / "summary_report.md", "w") as f:

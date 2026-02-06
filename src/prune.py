@@ -1,5 +1,7 @@
 import gc
 import heapq
+import json
+import os
 from typing import Literal
 
 import torch
@@ -11,6 +13,7 @@ from transformer_lens import HookedTransformer
 from transformers import AutoTokenizer
 
 from src.suite_cfg_schema import SuiteConfig
+from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
 
 
 def estimate_vasicek_entropy(activations, window=None):
@@ -400,4 +403,15 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     pruned_dataset.save_to_disk(
         suite.dirs.get_dataset_path(dataset_size=dataset_size, topk=topk)
     )
+
+    dataset_cfg_path = os.path.join(
+        suite.dirs.get_dataset_path(dataset_size=dataset_size, topk=topk),
+        DATASET_CONFIG_FILENAME,
+    )
+    model_cfg = {
+        PRUNE_ID_KEY: suite.ids.prune,
+    }
+    with open(dataset_cfg_path, "w") as f:
+        json.dump(model_cfg, f, indent=4)
+
     print(f"[PRUNE] Dataset generated for dataset_size={dataset_size}, topk={topk}.")

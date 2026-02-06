@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 from typing import Optional, cast
 
-import evaluate
 import torch
 from datasets import load_dataset
 from peft import PeftModel
@@ -19,6 +18,8 @@ from src.utils.constants import (
     EVAL_RESULTS_KEY,
 )
 from src.utils.enums import ModelType
+from src.utils.evaluator import Evaluator
+from src.utils.ollama_manager import OllamaManager
 
 
 # Unified eval_and_save function for both baseline and trained model evals
@@ -31,22 +32,51 @@ def eval_and_save(
     topk: Optional[int] = None,
 ):
     datasets_map = load_eval_datasets(seed=suite.seed, limit=suite.eval.cfg.num_samples)
-    rouge = evaluate.load("rouge")
     batch_size = suite.eval.params.batch_size
-
     model_scores = {}
-    for ds_name, data in datasets_map.items():
-        preds, refs = generate_responses(
-            model,
-            tokenizer,
-            data,
-            batch_size=batch_size,
-            max_new_tokens=suite.eval.cfg.max_new_tokens,
+
+    with OllamaManager(ollama_judge=suite.eval.cfg.ollama_judge) as ol_man:
+        evaluator = Evaluator(
+            model=model,
+            tokenizer=tokenizer,
+            ollama_judge=suite.eval.cfg.ollama_judge,
         )
-        scores = rouge.compute(predictions=preds, references=refs, use_aggregator=True)
-        model_scores[ds_name] = round(scores["rougeL"] * 100, 2)
-    eval_score = sum(model_scores.values()) / len(model_scores) if model_scores else 0
-    eval_scores = {"average_eval_score": eval_score, **model_scores}
+        for ds_name, data in datasets_map.items():
+            preds, refs = generate_responses(
+                model,
+                tokenizer,
+                data,
+                batch_size=batch_size,
+                max_new_tokens=suite.eval.cfg.max_new_tokens,
+            )
+            eval_payload = []
+            for i in range(len(preds)):
+                eval_payload.append(
+                    {
+                        "prompt": data[i]["prompt"],
+                        "reference": refs[i],
+                        "generation": preds[i],
+                    }
+                )
+
+            dataset_means = evaluator.run_full_eval(
+                test_data=eval_payload, port=ol_man.port
+            )
+
+            model_scores[ds_name] = {
+                "rougeL": round(dataset_means["rouge_l"] * 100, 2),
+                "perplexity": round(dataset_means["perplexity"], 2),
+                "judge_score": round(dataset_means["judge_score"], 3),
+            }
+
+    # Calculate global average (using judge_score as the primary 'eval_score')
+    if model_scores:
+        avg_judge = sum(m["judge_score"] for m in model_scores.values()) / len(
+            model_scores
+        )
+        eval_scores = {"average_eval_score": round(avg_judge, 3), **model_scores}
+    else:
+        eval_scores = {"average_eval_score": 0}
 
     cfg = {
         "model_type": model_type.value,
@@ -107,7 +137,6 @@ def load_eval_datasets(seed: int, limit=None):
     print(" - Loading Dolly-15k...")
     ds = load_dataset("databricks/databricks-dolly-15k", split="train")
     ds = ds.shuffle(seed=seed)
-    # ds = ds.select(range(len(ds) - 1000, len(ds)))  # Take last 1000 as pseudo-test
     if limit and limit < len(ds):
         ds = ds.select(range(limit))
 
@@ -174,6 +203,24 @@ def load_eval_datasets(seed: int, limit=None):
             + "\nPassage: "
             + row["inputs"],
             "reference": row["targets"],
+        }
+        for row in ds
+    ]
+
+    # 5. WizardLM (Evol-Instruct)
+    print(" - Loading WizardLM (Evol-Instruct)...")
+    ds = load_dataset(
+        "WizardLM/WizardLM_evol_instruct_70k",
+        split="train",
+    )
+    ds = ds.shuffle(seed=seed)
+    if limit and limit < len(ds):
+        ds = ds.select(range(limit))
+
+    eval_data["WizardLM"] = [
+        {
+            "prompt": row["instruction"],
+            "reference": row["output"],
         }
         for row in ds
     ]

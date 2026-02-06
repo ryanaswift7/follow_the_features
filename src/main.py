@@ -7,10 +7,12 @@ from src.sft import run_sft
 from src.suite_cfg_schema import SuiteConfig
 from src.utils.analysis import aggregate_results, plot_experiment_results
 from src.utils.constants import (
+    DATASET_CONFIG_FILENAME,
     EVAL_CONFIG_FILENAME,
     EVAL_ID_KEY,
     EVAL_RESULTS_FILENAME,
     EVAL_RESULTS_KEY,
+    MODEL_CONFIG_FILENAME,
     MODEL_EXISTENCE_FILENAME,
     PRUNE_ID_KEY,
     SFT_ID_KEY,
@@ -110,15 +112,33 @@ def run_experiments(suite: SuiteConfig):
                 print(
                     f"[MISSING] Results missing or config hashes do not match for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Will run necessary steps."
                 )
-                need_prune = not (
-                    suite.dirs.get_dataset_path(dataset_size=n, topk=k).exists()
-                    and prune_id_match
-                )
-                model_exists = (
-                    suite.dirs.get_trained_model_root(dataset_size=n, topk=k)
-                    / MODEL_EXISTENCE_FILENAME
-                ).exists()
-                need_sft = not (model_exists and sft_id_match)
+                need_prune = True
+
+                ds_dir = suite.dirs.get_dataset_path(dataset_size=n, topk=k)
+                ds_cfg_file = ds_dir / DATASET_CONFIG_FILENAME
+
+                if ds_dir.exists() and ds_cfg_file.exists():
+                    with open(ds_cfg_file, "r") as f:
+                        ds_cfg = json.load(f)
+
+                    if ds_cfg.get(PRUNE_ID_KEY) == suite.ids.prune:
+                        need_prune = False
+
+                need_sft = True
+
+                model_root = suite.dirs.get_trained_model_root(dataset_size=n, topk=k)
+                model_cfg_file = model_root / MODEL_CONFIG_FILENAME
+                model_exists_marker = (model_root / MODEL_EXISTENCE_FILENAME).exists()
+
+                if model_exists_marker and model_cfg_file.exists():
+                    with open(model_cfg_file, "r") as f:
+                        model_cfg = json.load(f)
+
+                    matches_prune = model_cfg.get(PRUNE_ID_KEY) == suite.ids.prune
+                    matches_sft = model_cfg.get(SFT_ID_KEY) == suite.ids.sft
+
+                    if matches_prune and matches_sft:
+                        need_sft = False
                 if need_prune:
                     print(
                         f"[MISSING] Dataset missing for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Running dataset pruning..."

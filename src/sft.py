@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 import shutil
 
@@ -10,6 +11,7 @@ from trl.trainer.sft_config import SFTConfig
 from trl.trainer.sft_trainer import SFTTrainer
 
 from src.suite_cfg_schema import SuiteConfig
+from src.utils.constants import MODEL_CONFIG_FILENAME, PRUNE_ID_KEY, SFT_ID_KEY
 
 
 def format_to_conversation(sample):
@@ -87,6 +89,14 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     trainer.train()
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
+
+    model_cfg_path = os.path.join(output_dir, MODEL_CONFIG_FILENAME)
+    model_cfg = {
+        PRUNE_ID_KEY: suite.ids.prune,
+        SFT_ID_KEY: suite.ids.sft,
+    }
+    with open(model_cfg_path, "w") as f:
+        json.dump(model_cfg, f, indent=4)
 
     # Only remove checkpoint directories if final model file exists
     final_model_path = os.path.join(output_dir, "adapter_model.safetensors")
