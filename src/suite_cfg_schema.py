@@ -9,7 +9,7 @@ from src.utils.hashing import config_hash, string_hash
 
 
 class PruneConfig(BaseModel):
-    model_id: str
+    prune_model_id: str
     sae_release: str
     sae_id: str
     dataset_id: str
@@ -35,6 +35,11 @@ class SFTConfig(BaseModel):
     max_original_samples: int
     tokenizer_id: str
     base_model_id: str
+
+    @computed_field
+    @property
+    def reference_model_id(self) -> str:
+        return self.base_model_id.replace("pt", "it")
 
 
 class SFTParams(BaseModel):
@@ -94,10 +99,20 @@ class SuiteDirs(BaseModel):
 
     @computed_field
     @property
-    def results(self) -> Path:
+    def _results_root(self) -> Path:
         return self._ensure_dir(
             self.suite_root / "results" / self.ids.experiment / self.timestamp
         )
+
+    @computed_field
+    @property
+    def results(self) -> Path:
+        return self._results_root / "main"
+
+    @computed_field
+    @property
+    def null_dist_results(self) -> Path:
+        return self._results_root / "null_dist"
 
     @computed_field
     @property
@@ -107,9 +122,9 @@ class SuiteDirs(BaseModel):
 
     @computed_field
     @property
-    def supervisor_model_eval(self) -> Path:
-        name = Path(self.prune_cfg.model_id).name
-        return self._ensure_dir(self.models / "supervisor_model" / name / self.ids.eval)
+    def reference_model_eval(self) -> Path:
+        name = Path(self.sft_cfg.reference_model_id).name
+        return self._ensure_dir(self.models / "reference_model" / name / self.ids.eval)
 
     def get_dataset_path(self, dataset_size: int, topk: int) -> Path:
         """
@@ -141,6 +156,8 @@ class SuiteConfig(BaseModel):
     title: str
     output_dir: Path
     seed: int
+    run_null_analysis: bool
+    num_null_trials: int
 
     prune: PruneSetup
     sft: SFTSetup
@@ -160,7 +177,7 @@ class SuiteConfig(BaseModel):
         p_id = f"prune_{config_hash(self.prune.cfg.model_dump())}"
         s_id = f"sft_{config_hash(self.sft.cfg.model_dump())}"
         e_id = f"eval_{config_hash(self.eval.cfg.model_dump())}"
-        exp_id = f"exp_{string_hash(p_id + s_id + e_id)}"
+        exp_id = f"exp_{string_hash(p_id + s_id + e_id + str(self.seed))}"
 
         return SuiteIDs(prune=p_id, sft=s_id, eval=e_id, experiment=exp_id)
 

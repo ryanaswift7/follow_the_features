@@ -1,11 +1,12 @@
 import argparse
 import json
 
+from analysis import aggregate_results, plot_experiment_results
+from null_dists import generate_and_analyze_null_dists
 from src.eval import run_baseline_evals, run_eval
 from src.prune import run_prune
 from src.sft import run_sft
 from src.suite_cfg_schema import SuiteConfig
-from src.utils.analysis import aggregate_results, plot_experiment_results
 from src.utils.constants import (
     DATASET_CONFIG_FILENAME,
     EVAL_CONFIG_FILENAME,
@@ -28,16 +29,16 @@ def run_experiments(suite: SuiteConfig):
     base_model_eval_results_path = suite.dirs.base_model_eval / EVAL_RESULTS_FILENAME
     base_model_eval_cfg_path = suite.dirs.base_model_eval / EVAL_CONFIG_FILENAME
 
-    supervisor_model_eval_results_path = (
-        suite.dirs.supervisor_model_eval / EVAL_RESULTS_FILENAME
+    reference_model_eval_results_path = (
+        suite.dirs.reference_model_eval / EVAL_RESULTS_FILENAME
     )
-    supervisor_model_eval_cfg_path = (
-        suite.dirs.supervisor_model_eval / EVAL_CONFIG_FILENAME
+    reference_model_eval_cfg_path = (
+        suite.dirs.reference_model_eval / EVAL_CONFIG_FILENAME
     )
     baseline_valid = False
     if (
         base_model_eval_results_path.exists()
-        and supervisor_model_eval_results_path.exists()
+        and reference_model_eval_results_path.exists()
     ):
         try:
             # base model
@@ -52,18 +53,18 @@ def run_experiments(suite: SuiteConfig):
                 and base_model_eval_cfg.get(EVAL_ID_KEY) == suite.ids.eval
             )
 
-            # supervisor model
-            with open(supervisor_model_eval_results_path, "r") as f:
-                supervisor_results = json.load(f)
-            with open(supervisor_model_eval_cfg_path, "r") as f:
-                supervisor_eval_cfg = json.load(f)
-            supervisor_model_scores = supervisor_results.get(EVAL_RESULTS_KEY)
-            supervisor_model_valid = (
-                supervisor_model_scores
-                and supervisor_eval_cfg.get(EVAL_ID_KEY) == suite.ids.eval
+            # reference model
+            with open(reference_model_eval_results_path, "r") as f:
+                reference_results = json.load(f)
+            with open(reference_model_eval_cfg_path, "r") as f:
+                reference_eval_cfg = json.load(f)
+            reference_model_scores = reference_results.get(EVAL_RESULTS_KEY)
+            reference_model_valid = (
+                reference_model_scores
+                and reference_eval_cfg.get(EVAL_ID_KEY) == suite.ids.eval
             )
 
-            baseline_valid = base_model_valid and supervisor_model_valid
+            baseline_valid = base_model_valid and reference_model_valid
         except Exception as e:
             print(
                 f"[BASELINE] Error reading baseline results: {e}. Will re-run baselines."
@@ -199,8 +200,16 @@ def main():
 
     # At the end, reload all results to ensure aggregation is complete
     all_results_df = aggregate_results(suite=suite)
-    plot_experiment_results(original_df=all_results_df, suite=suite)
-    print("[DONE] All experiments complete.")
+    global_summary_df = plot_experiment_results(original_df=all_results_df, suite=suite)
+
+    if suite.run_null_analysis:
+        generate_and_analyze_null_dists(
+            suite=suite,
+            num_trials=suite.num_null_trials,
+            experiments_global_summary_df=global_summary_df,
+        )
+
+    print("[DONE] All experiments and analysis complete.")
 
 
 if __name__ == "__main__":

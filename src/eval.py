@@ -2,7 +2,7 @@ import gc
 import json
 import os
 from pathlib import Path
-from typing import Optional, cast
+from typing import Dict, Optional, cast
 
 import torch
 from datasets import load_dataset
@@ -22,7 +22,59 @@ from src.utils.evaluator import Evaluator
 from src.utils.ollama_manager import OllamaManager
 
 
-# Unified eval_and_save function for both baseline and trained model evals
+def write_eval_results_and_config(
+    eval_scores: Dict,
+    suite: SuiteConfig,
+    model_type: ModelType,
+    dataset_size: Optional[int] = None,
+    topk: Optional[int] = None,
+):
+    cfg = {
+        "model_type": model_type.value,
+        "model_id": suite.sft.cfg.base_model_id
+        if model_type != ModelType.REFERENCE
+        else suite.sft.cfg.reference_model_id,
+        "topk": topk,
+        "dataset_size": dataset_size,
+        "model_path": suite.dirs.get_trained_model_root(
+            dataset_size=cast(int, dataset_size), topk=cast(int, topk)
+        ).as_posix()
+        if model_type == ModelType.ADAPTER
+        else None,
+        "dataset_path": suite.dirs.get_dataset_path(
+            dataset_size=cast(int, dataset_size), topk=cast(int, topk)
+        ).as_posix()
+        if model_type == ModelType.ADAPTER
+        else None,
+        "prune_id": suite.ids.prune,
+        "sft_id": suite.ids.sft,
+        "eval_id": suite.ids.eval,
+        "prune_config": suite.prune.cfg.model_dump(),
+        "sft_config": suite.sft.cfg.model_dump(),
+        "eval_config": suite.eval.cfg.model_dump(),
+    }
+    results = {
+        "eval_scores": eval_scores,
+    }
+
+    if model_type == ModelType.ADAPTER:
+        eval_dir = suite.dirs.get_trained_model_eval(
+            dataset_size=cast(int, dataset_size), topk=cast(int, topk)
+        )
+    elif model_type == ModelType.BASE:
+        eval_dir = suite.dirs.base_model_eval
+    elif model_type == ModelType.REFERENCE:
+        eval_dir = suite.dirs.reference_model_eval
+
+    eval_config_path = eval_dir / EVAL_CONFIG_FILENAME
+    results_path = eval_dir / EVAL_RESULTS_FILENAME
+    with open(eval_config_path, "w") as f:
+        json.dump(cfg, f, indent=4)
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=4)
+    return
+
+
 def eval_and_save(
     model,
     tokenizer,
@@ -30,10 +82,15 @@ def eval_and_save(
     model_type: ModelType,
     dataset_size: Optional[int] = None,
     topk: Optional[int] = None,
-):
+    save_results_and_config: bool = True,
+) -> float:
     datasets_map = load_eval_datasets(seed=suite.seed, limit=suite.eval.cfg.num_samples)
     batch_size = suite.eval.params.batch_size
     model_scores = {}
+
+    model.eval()
+    torch.cuda.empty_cache()
+    gc.collect()
 
     with OllamaManager(ollama_judge=suite.eval.cfg.ollama_judge) as ol_man:
         evaluator = Evaluator(
@@ -78,50 +135,16 @@ def eval_and_save(
     else:
         eval_scores = {"average_eval_score": 0}
 
-    cfg = {
-        "model_type": model_type.value,
-        "model_id": suite.sft.cfg.base_model_id
-        if model_type != ModelType.SUPERVISOR
-        else suite.prune.cfg.model_id,
-        "topk": topk,
-        "dataset_size": dataset_size,
-        "model_path": suite.dirs.get_trained_model_root(
-            dataset_size=cast(int, dataset_size), topk=cast(int, topk)
-        ).as_posix()
-        if model_type == ModelType.ADAPTER
-        else None,
-        "dataset_path": suite.dirs.get_dataset_path(
-            dataset_size=cast(int, dataset_size), topk=cast(int, topk)
-        ).as_posix()
-        if model_type == ModelType.ADAPTER
-        else None,
-        "prune_id": suite.ids.prune,
-        "sft_id": suite.ids.sft,
-        "eval_id": suite.ids.eval,
-        "prune_config": suite.prune.cfg.model_dump(),
-        "sft_config": suite.sft.cfg.model_dump(),
-        "eval_config": suite.eval.cfg.model_dump(),
-    }
-    results = {
-        "eval_scores": eval_scores,
-    }
-
-    if model_type == ModelType.ADAPTER:
-        eval_dir = suite.dirs.get_trained_model_eval(
-            dataset_size=cast(int, dataset_size), topk=cast(int, topk)
+    if save_results_and_config:
+        write_eval_results_and_config(
+            eval_scores=eval_scores,
+            suite=suite,
+            model_type=model_type,
+            dataset_size=dataset_size,
+            topk=topk,
         )
-    elif model_type == ModelType.BASE:
-        eval_dir = suite.dirs.base_model_eval
-    elif model_type == ModelType.SUPERVISOR:
-        eval_dir = suite.dirs.supervisor_model_eval
 
-    eval_config_path = eval_dir / EVAL_CONFIG_FILENAME
-    results_path = eval_dir / EVAL_RESULTS_FILENAME
-    with open(eval_config_path, "w") as f:
-        json.dump(cfg, f, indent=4)
-    with open(results_path, "w") as f:
-        json.dump(results, f, indent=4)
-    return
+    return eval_scores["average_eval_score"]
 
 
 def load_eval_datasets(seed: int, limit=None):
@@ -279,14 +302,14 @@ def run_eval(
     dataset_size: Optional[int] = None,
     topk: Optional[int] = None,
 ):
-    if model_type == ModelType.SUPERVISOR:
-        model_id = suite.prune.cfg.model_id
+    if model_type == ModelType.REFERENCE:
+        model_id = suite.sft.cfg.reference_model_id
     else:
         model_id = suite.sft.cfg.base_model_id
 
     tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map="auto", torch_dtype=torch.bfloat16
+        model_id, device_map="auto", torch_dtype=torch.float16
     )
 
     if model_type == ModelType.ADAPTER:
@@ -358,7 +381,7 @@ def verify_or_run_eval(
     print(f"Evaluating {model_type.name} model ({model_id})...")
     tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map="auto", torch_dtype=torch.bfloat16
+        model_id, device_map="auto", torch_dtype=torch.float16
     )
 
     eval_and_save(
@@ -380,7 +403,7 @@ def verify_or_run_eval(
 
 def run_baseline_evals(suite: SuiteConfig):
     """
-    Run and save baseline (base and supervisor) model evaluations.
+    Run and save baseline (base and reference) model evaluations.
     """
     # Base Model
     verify_or_run_eval(
@@ -390,11 +413,11 @@ def run_baseline_evals(suite: SuiteConfig):
         suite=suite,
     )
 
-    # Supervisor Model
+    # Reference Model
     verify_or_run_eval(
-        model_id=suite.prune.cfg.model_id,
-        model_type=ModelType.SUPERVISOR,
-        eval_dir=suite.dirs.supervisor_model_eval,
+        model_id=suite.sft.cfg.reference_model_id,
+        model_type=ModelType.REFERENCE,
+        eval_dir=suite.dirs.reference_model_eval,
         suite=suite,
     )
 

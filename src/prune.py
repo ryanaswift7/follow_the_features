@@ -2,7 +2,8 @@ import gc
 import heapq
 import json
 import os
-from typing import Literal
+from functools import partial
+from typing import Literal, Optional
 
 import torch
 from datasets import load_dataset
@@ -22,12 +23,12 @@ def estimate_vasicek_entropy(activations, window=None):
     """
     vals = activations[activations > 0].numpy()
     if len(vals) < 20:  # Minimum samples for a stable estimate
-        return 1e-8
+        return 1e-5
     return differential_entropy(vals)
 
 
 def estimate_vasicek_entropy_vectorized(
-    activations: torch.Tensor, m: int = None
+    activations: torch.Tensor, m: Optional[int] = None
 ) -> float:
     """
     Estimates differential entropy using the Vasicek n-spacing method.
@@ -46,7 +47,7 @@ def estimate_vasicek_entropy_vectorized(
     n = vals.numel()
     # Require a minimum number of samples for a statistically valid density estimate
     if n < 20:
-        return 1e-8
+        return 1e-5
 
     # 2. Sort (Required for spacing methods)
     # PyTorch sort is highly optimized and often faster than converting to numpy
@@ -110,9 +111,9 @@ def get_topk_features(
     d_sae = sae.cfg.d_sae
     feature_sum = torch.zeros(d_sae, device="cpu", dtype=torch.float32)
 
-    # MEMORY FIX: Pre-allocate a bfloat16 tensor for samples
+    # MEMORY FIX: Pre-allocate a float16 tensor for samples
     sample_buffer = torch.zeros(
-        (d_sae, max_entropy_samples), dtype=torch.bfloat16, device="cpu"
+        (d_sae, max_entropy_samples), dtype=torch.float16, device="cpu"
     )
     sample_counts = torch.zeros(d_sae, dtype=torch.long, device="cpu")
 
@@ -141,10 +142,8 @@ def get_topk_features(
             rms = torch.sqrt(torch.mean(flat_acts**2, dim=-1, keepdim=True) + 1e-8)
             scaled_acts = flat_acts / rms
 
-            # Encode and move to CPU immediately as bfloat16
-            feature_acts = sae.encode(scaled_acts).to(
-                dtype=torch.bfloat16, device="cpu"
-            )
+            # Encode and move to CPU immediately as float16
+            feature_acts = sae.encode(scaled_acts).to(dtype=torch.float16, device="cpu")
 
             # Accumulate Sum (cast to float32 for precision in summation)
             feature_sum += feature_acts.to(torch.float32).sum(dim=0)
@@ -327,12 +326,23 @@ def get_top_sample_indices(
     return [idx for score, idx in top_heap]
 
 
+def apply_chat_formatting_with_tokenizer(tokenizer, examples):
+    formatted_texts = []
+    for inst, inp in zip(examples["instruction"], examples["input"]):
+        conversation = [{"role": "user", "content": f"{inst}\n{inp}" if inp else inst}]
+        text = tokenizer.apply_chat_template(
+            conversation, tokenize=False, add_generation_prompt=True
+        )
+        formatted_texts.append(text)
+    return {"formatted_text": formatted_texts}
+
+
 def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     print(f"[PRUNE] Starting pruning for dataset_size={dataset_size}, topk={topk}...")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Unpack config
-    model_id = suite.prune.cfg.model_id
+    model_id = suite.prune.cfg.prune_model_id
     sae_release = suite.prune.cfg.sae_release
     sae_id = suite.prune.cfg.sae_id
     dataset_id = suite.prune.cfg.dataset_id
@@ -344,7 +354,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     print(f"--- Prune: dataset_size={dataset_size}, topk={topk} ---")
     tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
     model = HookedTransformer.from_pretrained_no_processing(
-        model_id, device=device, dtype=torch.bfloat16
+        model_id, device=device, dtype=torch.float16
     )
     sae, _, _ = SAE.from_pretrained_with_cfg_and_sparsity(
         release=sae_release, sae_id=sae_id, device=device
@@ -353,19 +363,11 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     if num_samples is not None and num_samples < len(dataset):
         dataset = dataset.select(range(num_samples))
 
-    def apply_chat_formatting(examples):
-        formatted_texts = []
-        for inst, inp in zip(examples["instruction"], examples["input"]):
-            conversation = [
-                {"role": "user", "content": f"{inst}\n{inp}" if inp else inst}
-            ]
-            text = tokenizer.apply_chat_template(
-                conversation, tokenize=False, add_generation_prompt=True
-            )
-            formatted_texts.append(text)
-        return {"formatted_text": formatted_texts}
-
-    dataset = dataset.map(apply_chat_formatting, batched=True, batch_size=batch_size)
+    dataset = dataset.map(
+        partial(apply_chat_formatting_with_tokenizer, tokenizer=tokenizer),
+        batched=True,
+        batch_size=batch_size,
+    )
     feature_selection_dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size
     )

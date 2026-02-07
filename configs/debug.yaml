@@ -1,9 +1,11 @@
 title: "debug"
 output_dir: "experiments"
 seed: 3
+run_null_analysis: true
+num_null_trials: 2
 prune:
   cfg:
-    model_id: &supervisor "google/gemma-3-270m-it"
+    prune_model_id: &prune_model "google/gemma-3-270m-it"
     sae_release: "gemma-scope-2-270m-it-res"
     sae_id: "layer_9_width_65k_l0_medium"
     dataset_id: "yahma/alpaca-cleaned"
@@ -16,7 +18,7 @@ prune:
     topk_features: [3, 6]
 sft:
   cfg:
-    tokenizer_id: *supervisor
+    tokenizer_id: *prune_model
     base_model_id: "google/gemma-3-1b-pt"
     max_seq_length: 8
     learning_rate: 0.0002

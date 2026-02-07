@@ -39,17 +39,17 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
         )
         rows.append(base_data)
 
-    # 2. Load Supervisor Model
-    sup_data = load_json_safe(suite.dirs.supervisor_model_eval / EVAL_RESULTS_FILENAME)
-    if sup_data:
-        sup_data.update(
+    # 2. Load Reference Model
+    ref_data = load_json_safe(suite.dirs.reference_model_eval / EVAL_RESULTS_FILENAME)
+    if ref_data:
+        ref_data.update(
             {
-                "model_type": ModelType.SUPERVISOR.value,
+                "model_type": ModelType.REFERENCE.value,
                 "topk_features": NAN_RESULT,
                 "dataset_size": NAN_RESULT,
             }
         )
-        rows.append(sup_data)
+        rows.append(ref_data)
 
     # 3. Load Trained Pruned Models
     for k in suite.prune.params.topk_features:
@@ -74,9 +74,11 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
     return df
 
 
-def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig):
+def plot_experiment_results(
+    original_df: pd.DataFrame, suite: SuiteConfig
+) -> pd.DataFrame:
     print("[PLOT] Generating individual plots and summary tables per Top-K...")
-    print(original_df)
+    # print(original_df) # Optional: Comment out for cleaner logs
 
     # 1. Flatten the nested 'eval_scores' dictionary into columns
     scores_df = pd.json_normalize(original_df["eval_scores"])
@@ -88,9 +90,42 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig):
     # 2. Extract Baselines (to be reused as horizontal lines in every plot)
     baseline_df = df[df["model_type"] != ModelType.ADAPTER.value].copy()
 
-    # 3. Get unique Top-K values (ignoring the "Baseline" label)
+    # 3. Get unique Top-K values (ignoring the "Baseline" label if present in this col)
     topk_values = [k for k in df["topk_features"].unique() if k != NAN_RESULT]
 
+    # --- NEW: GLOBAL SUMMARY TABLE (ALL RESULTS) ---
+    # Create the root tables directory if it doesn't exist
+    global_table_path = suite.dirs.results / "tables"
+    global_table_path.mkdir(parents=True, exist_ok=True)
+
+    # Prepare Global DataFrame
+    # Select identifier columns and all metric columns
+    # We include 'topk_features' here since this is the global view
+    global_cols = ["model_type", "topk_features", "dataset_size"] + metrics
+    global_summary_df = df[global_cols].copy()
+
+    # Formatting Clean-up for Baselines in the Global Table
+    # Set dataset_size and topk to NAN_RESULT for non-adapter models for clarity
+    is_not_adapter = global_summary_df["model_type"] != ModelType.ADAPTER.value
+    global_summary_df.loc[is_not_adapter, "dataset_size"] = NAN_RESULT
+    global_summary_df.loc[is_not_adapter, "topk_features"] = NAN_RESULT
+
+    # Sort for readability (Model Type -> TopK -> Size)
+    global_summary_df = global_summary_df.sort_values(
+        by=["model_type", "topk_features", "dataset_size"], na_position="first"
+    )
+
+    # Save Global: Parquet
+    global_summary_df.to_parquet(global_table_path / "global_summary.parquet")
+
+    # Save Global: Markdown
+    with open(global_table_path / "global_summary.md", "w") as f:
+        f.write("# Global Experiment Summary\n\n")
+        f.write(global_summary_df.to_markdown(index=False, floatfmt=".4f"))
+
+    print(f"[PLOT] Global summary saved to {global_table_path}")
+
+    # --- EXISTING LOOP: PER TOP-K ---
     for k in topk_values:
         # Create a specific DataFrame for the current Top-K trained models
         pruned_k_df = df[
@@ -109,17 +144,14 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig):
         for metric in metrics:
             plt.figure(figsize=(10, 6))
 
-            # Draw Horizontal Baseline lines (Base and Supervisor)
+            # Draw Horizontal Baseline lines (Base and Reference)
             for _, row in baseline_df.iterrows():
                 # Check against the Enum value
-                is_supervisor = row["model_type"] == ModelType.SUPERVISOR.value
-
+                is_reference = row["model_type"] == ModelType.REFERENCE.value
                 label = f"{row['model_type']} (baseline)"
 
-                # Both use "grey", only the style changes
-                # Supervisor: Dashed (--)
-                # Base: Dotted (:)
-                style = "--" if is_supervisor else ":"
+                # Reference: Dashed (--), Base: Dotted (:)
+                style = "--" if is_reference else ":"
 
                 plt.axhline(
                     y=row[metric],
@@ -175,3 +207,4 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig):
     print(
         f"[PLOT] Completed. Subdirectories created for: {', '.join(map(str, topk_values))}"
     )
+    return global_summary_df
