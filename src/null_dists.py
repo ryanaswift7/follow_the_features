@@ -1,6 +1,5 @@
 import argparse
 import gc
-from functools import partial
 from pathlib import Path
 from typing import Optional, Union
 
@@ -16,8 +15,8 @@ from trl.trainer.sft_trainer import SFTTrainer
 
 from src.eval import eval_and_save
 from src.prune import apply_chat_formatting_with_tokenizer
-from src.sft import PEFT_CONFIG, generate_sft_trainer_args
-from src.suite_cfg_schema import SuiteConfig
+from src.schemas.suite import SuiteConfig
+from src.sft import PEFT_CONFIG, format_to_conversation, generate_sft_trainer_args
 from src.utils.enums import ModelType
 from src.utils.reproducibility import enforce_reproducibility
 
@@ -44,7 +43,7 @@ def parse_args():
 
 
 def analyze_null_dists(
-    df: pd.DataFrame,
+    null_dist_df: pd.DataFrame,
     output_dir: Union[str, Path],
     experiments_global_summary_df: Optional[pd.DataFrame] = None,
 ):
@@ -61,12 +60,15 @@ def analyze_null_dists(
 
     print("\n[ANALYSIS] Starting Null Distribution Analysis")
     print(f"  - Output Directory: {output_dir}")
-    print(f"  - Null Samples: {len(df)}")
+    print(f"  - Null Samples: {len(null_dist_df)}")
 
     # --- 0. Data Cleaning ---
     print("[ANALYSIS] Standardizing column names...")
-    if "average_eval_score" in df.columns and "score" not in df.columns:
-        df = df.rename(columns={"average_eval_score": "score"})
+    if (
+        "average_eval_score" in null_dist_df.columns
+        and "score" not in null_dist_df.columns
+    ):
+        null_dist_df = null_dist_df.rename(columns={"average_eval_score": "score"})
 
     if experiments_global_summary_df is not None:
         if (
@@ -80,7 +82,7 @@ def analyze_null_dists(
     # --- 1. Generate Null Distribution Statistics ---
     print("[ANALYSIS] Calculating Null Distribution Summary Stats...")
     null_stats = (
-        df.groupby("dataset_size")["score"]
+        null_dist_df.groupby("dataset_size")["score"]
         .agg(
             Count="count",
             Mean="mean",
@@ -109,9 +111,9 @@ def analyze_null_dists(
 
     # Pre-calculate null stats dict for fast lookup
     null_lookup = {}
-    unique_sizes = df["dataset_size"].unique()
+    unique_sizes = null_dist_df["dataset_size"].unique()
     for size in unique_sizes:
-        subset = df[df["dataset_size"] == size]["score"]
+        subset = null_dist_df[null_dist_df["dataset_size"] == size]["score"]
         null_lookup[size] = {
             "mean": subset.mean(),
             "std": subset.std(),
@@ -212,7 +214,7 @@ def analyze_null_dists(
     plt.figure(figsize=(12, 8))
 
     # A. Plot Null Data
-    null_plot_data = df.copy()
+    null_plot_data = null_dist_df.copy()
     sns.scatterplot(
         data=null_plot_data,
         x="dataset_size",
@@ -275,7 +277,7 @@ def analyze_null_dists(
     plt.ylabel("Average Eval Score")
     plt.grid(True, linestyle=":", alpha=0.5)
 
-    unique_sizes = sorted(df["dataset_size"].unique())
+    unique_sizes = sorted(null_dist_df["dataset_size"].unique())
     plt.xticks(unique_sizes)
     plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
     plt.tight_layout()
@@ -320,10 +322,17 @@ def generate_null_distributions(suite: SuiteConfig, num_trials: int):
     print(f"[NULL-DIST] Applying chat formatting (Batch Size: {batch_size})...")
     # 'desc' adds a progress bar to the map operation
     full_ds = full_ds.map(
-        partial(apply_chat_formatting_with_tokenizer, tokenizer=tokenizer),
+        lambda examples: apply_chat_formatting_with_tokenizer(tokenizer, examples),
         batched=True,
         batch_size=batch_size,
         desc="Tokenizing Data",
+    )
+    full_ds = full_ds.map(
+        format_to_conversation,
+        remove_columns=full_ds.column_names,
+        # batched=True,
+        # batch_size=batch_size,
+        # desc="Formatting to Conversation",
     )
 
     # --- 3. Main Experiment Loop ---
@@ -353,7 +362,7 @@ def generate_null_distributions(suite: SuiteConfig, num_trials: int):
             # B. Load Model
             # Using 'quiet' loading if possible, or just standard
             model = AutoModelForCausalLM.from_pretrained(
-                base_model_id, device_map="auto", torch_dtype=torch.float16
+                base_model_id, device_map="auto", torch_dtype=torch.bfloat16
             )
 
             # C. Train
@@ -374,7 +383,8 @@ def generate_null_distributions(suite: SuiteConfig, num_trials: int):
 
             # D. Evaluate
             # pbar_trials.write(f"  > Evaluating...")
-            eval_score = eval_and_save(
+
+            all_eval_scores, _ = eval_and_save(
                 model=trainer.model,
                 tokenizer=tokenizer,
                 suite=suite,
@@ -383,14 +393,15 @@ def generate_null_distributions(suite: SuiteConfig, num_trials: int):
                 topk=None,
                 save_results_and_config=False,
             )
+            avg_eval_score = all_eval_scores["average_eval_score"]
 
             # E. Store Results
             data["dataset_size"].append(n)
             data["trial"].append(i)
-            data["score"].append(eval_score)
+            data["score"].append(avg_eval_score)
 
             # Update progress bar with latest score
-            pbar_trials.set_postfix({"Last Score": f"{eval_score:.4f}"})
+            pbar_trials.set_postfix({"Last Score": f"{avg_eval_score:.4f}"})
 
             # F. Cleanup Memory (Important for loops!)
             del model, trainer
@@ -407,15 +418,20 @@ def generate_and_analyze_null_dists(
     experiments_global_summary_df: Optional[pd.DataFrame] = None,
 ):
 
+    suite.dirs.null_dist_results.mkdir(parents=True, exist_ok=True)
     enforce_reproducibility(seed=suite.seed)
-    df = generate_null_distributions(suite=suite, num_trials=num_trials)
-    print(df)
+    null_dist_df = generate_null_distributions(suite=suite, num_trials=num_trials)
+    print(null_dist_df)
 
-    df.to_markdown(suite.dirs.null_dist_results / "raw_null_distribution_data.md")
-    df.to_parquet(suite.dirs.null_dist_results / "raw_null_distribution_data.parquet")
+    null_dist_df.to_markdown(
+        suite.dirs.null_dist_results / "raw_null_distribution_data.md"
+    )
+    null_dist_df.to_parquet(
+        suite.dirs.null_dist_results / "raw_null_distribution_data.parquet"
+    )
 
     analyze_null_dists(
-        df=df,
+        null_dist_df=null_dist_df,
         output_dir=suite.dirs.null_dist_results / "analysis",
         experiments_global_summary_df=experiments_global_summary_df,
     )

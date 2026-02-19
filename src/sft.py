@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl.trainer.sft_config import SFTConfig
 from trl.trainer.sft_trainer import SFTTrainer
 
-from src.suite_cfg_schema import SuiteConfig
+from src.schemas.suite import SuiteConfig
 from src.utils.constants import MODEL_CONFIG_FILENAME, PRUNE_ID_KEY, SFT_ID_KEY
 
 PEFT_CONFIG = LoraConfig(
@@ -87,7 +87,7 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     dataset = dataset.map(format_to_conversation, remove_columns=dataset.column_names)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map="auto", torch_dtype=torch.float16
+        model_id, device_map="auto", torch_dtype=torch.bfloat16
     )
 
     trainer = SFTTrainer(
@@ -99,7 +99,7 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     )
 
     trainer.train()
-    trainer.save_model(output_dir)
+    trainer.save_model(str(output_dir))
     tokenizer.save_pretrained(output_dir)
 
     model_cfg_path = os.path.join(output_dir, MODEL_CONFIG_FILENAME)

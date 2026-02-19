@@ -1,34 +1,40 @@
 title: "debug"
 output_dir: "experiments"
 seed: 3
-run_null_analysis: true
-num_null_trials: 2
+run_null_analysis: false
+num_null_trials: 5
+debug_mode: true
 prune:
   cfg:
     prune_model_id: &prune_model "google/gemma-3-270m-it"
     sae_release: "gemma-scope-2-270m-it-res"
     sae_id: "layer_9_width_65k_l0_medium"
     dataset_id: "yahma/alpaca-cleaned"
-    num_samples: &samples 10
+    num_samples: &samples 2
     seq_agg_method: "sum"  # possible values: "sum", "mean", "max"
     feat_agg_method: "sum"  # possible values: "sum", "mean"
+    divide_by_entropy: true
   params:
     batch_size: 2
-    dataset_sizes: [2, 4]
+    dataset_sizes: [2, 5]
     topk_features: [3, 6]
 sft:
   cfg:
     tokenizer_id: *prune_model
     base_model_id: "google/gemma-3-1b-pt"
-    max_seq_length: 8
+    max_seq_length: 10
     learning_rate: 0.0002
     max_original_samples: *samples
   params:
     batch_size: 2
 eval:
   cfg:
-    num_samples: 10
-    max_new_tokens: 8
-    ollama_judge: "gemma3:12b-it-fp16"
+    num_samples: 2
+    max_new_tokens: 2
+    ollama_judge: "llama3.3:70b"
+    num_ref_models: 2
+    tasks: 
+      - "leaderboard"
+    task_limit: 1
   params:
     batch_size:  2

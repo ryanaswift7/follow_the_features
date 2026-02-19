@@ -3,7 +3,7 @@ import json
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from src.suite_cfg_schema import SuiteConfig
+from src.schemas.suite import SuiteConfig
 from src.utils.constants import EVAL_RESULTS_FILENAME, NAN_RESULT
 from src.utils.enums import ModelType
 
@@ -78,20 +78,41 @@ def plot_experiment_results(
     original_df: pd.DataFrame, suite: SuiteConfig
 ) -> pd.DataFrame:
     print("[PLOT] Generating individual plots and summary tables per Top-K...")
-    # print(original_df) # Optional: Comment out for cleaner logs
 
     # 1. Flatten the nested 'eval_scores' dictionary into columns
-    scores_df = pd.json_normalize(original_df["eval_scores"])
-    df = pd.concat([original_df.drop(columns=["eval_scores"]), scores_df], axis=1)
+    def clean_dict_col(x):
+        return x if isinstance(x, dict) else {}
 
-    # All metrics available to plot (e.g., 'average_eval_score', 'task_1', 'task_2')
-    metrics = list(scores_df.columns)
+    ref_df = pd.json_normalize(
+        original_df["reference_results"].apply(clean_dict_col).tolist()
+    )
+    ref_df.index = original_df.index
+    lm_df = pd.json_normalize(
+        original_df["lm_eval_results"].apply(clean_dict_col).tolist()
+    )
+    lm_df.index = original_df.index
+    scores_df = pd.concat(
+        [
+            original_df.drop(columns=["reference_results", "lm_eval_results"]),
+            ref_df,
+            lm_df,
+        ],
+        axis=1,
+    )
+
+    # print(scores_df)
+
+    # All metrics available in the data
+    all_metrics = list(ref_df.columns) + list(lm_df.columns)
+
+    # Only these metrics will generate .png plots
+    PLOT_METRICS = ["average_judge_score", "leaderboard"]
 
     # 2. Extract Baselines (to be reused as horizontal lines in every plot)
-    baseline_df = df[df["model_type"] != ModelType.ADAPTER.value].copy()
+    baseline_df = scores_df[scores_df["model_type"] != ModelType.ADAPTER.value].copy()
 
     # 3. Get unique Top-K values (ignoring the "Baseline" label if present in this col)
-    topk_values = [k for k in df["topk_features"].unique() if k != NAN_RESULT]
+    topk_values = [k for k in scores_df["topk_features"].unique() if k != NAN_RESULT]
 
     # --- NEW: GLOBAL SUMMARY TABLE (ALL RESULTS) ---
     # Create the root tables directory if it doesn't exist
@@ -99,16 +120,15 @@ def plot_experiment_results(
     global_table_path.mkdir(parents=True, exist_ok=True)
 
     # Prepare Global DataFrame
-    # Select identifier columns and all metric columns
-    # We include 'topk_features' here since this is the global view
-    global_cols = ["model_type", "topk_features", "dataset_size"] + metrics
-    global_summary_df = df[global_cols].copy()
+    global_cols = ["model_type", "topk_features", "dataset_size"] + all_metrics
+    global_summary_df = scores_df[global_cols].copy()
+
+    print(global_summary_df)
 
     # Formatting Clean-up for Baselines in the Global Table
-    # Set dataset_size and topk to NAN_RESULT for non-adapter models for clarity
-    is_not_adapter = global_summary_df["model_type"] != ModelType.ADAPTER.value
-    global_summary_df.loc[is_not_adapter, "dataset_size"] = NAN_RESULT
-    global_summary_df.loc[is_not_adapter, "topk_features"] = NAN_RESULT
+    # is_not_adapter = global_summary_df["model_type"] != ModelType.ADAPTER.value
+    # global_summary_df.loc[is_not_adapter, "dataset_size"] = NAN_RESULT
+    # global_summary_df.loc[is_not_adapter, "topk_features"] = NAN_RESULT
 
     # Sort for readability (Model Type -> TopK -> Size)
     global_summary_df = global_summary_df.sort_values(
@@ -118,34 +138,41 @@ def plot_experiment_results(
     # Save Global: Parquet
     global_summary_df.to_parquet(global_table_path / "global_summary.parquet")
 
-    # Save Global: Markdown
-    with open(global_table_path / "global_summary.md", "w") as f:
-        f.write("# Global Experiment Summary\n\n")
-        f.write(global_summary_df.to_markdown(index=False, floatfmt=".4f"))
+    # Save Global: CSV (Replaced Markdown)
+    global_summary_df.to_csv(global_table_path / "global_summary.csv", index=False)
 
     print(f"[PLOT] Global summary saved to {global_table_path}")
 
     # --- EXISTING LOOP: PER TOP-K ---
     for k in topk_values:
         # Create a specific DataFrame for the current Top-K trained models
-        pruned_k_df = df[
-            (df["model_type"] == ModelType.ADAPTER.value) & (df["topk_features"] == k)
+        pruned_k_df = scores_df[
+            (scores_df["model_type"] == ModelType.ADAPTER.value)
+            & (scores_df["topk_features"] == k)
         ].copy()
         pruned_k_df = pruned_k_df.sort_values("dataset_size")
 
-        # Create subdirectories: results/plots/top{k} and results/tables/top{k}
+        # Create subdirectories
         k_dir = f"top{k}"
         plot_path = suite.dirs.results / "plots" / k_dir
         table_path = suite.dirs.results / "tables" / k_dir
         plot_path.mkdir(parents=True, exist_ok=True)
         table_path.mkdir(parents=True, exist_ok=True)
 
-        # --- PLOTTING: One plot per score ---
-        for metric in metrics:
+        # --- PLOTTING: One plot per specific score ---
+        for metric in all_metrics:
+            # Check: Is this a metric we want to plot?
+            if metric not in PLOT_METRICS:
+                continue
+
             plt.figure(figsize=(10, 6))
 
             # Draw Horizontal Baseline lines (Base and Reference)
             for _, row in baseline_df.iterrows():
+                # Skip if the baseline doesn't have a value for this metric (e.g. Reference missing judge score)
+                if pd.isna(row[metric]):
+                    continue
+
                 # Check against the Enum value
                 is_reference = row["model_type"] == ModelType.REFERENCE.value
                 label = f"{row['model_type']} (baseline)"
@@ -189,19 +216,14 @@ def plot_experiment_results(
         combined_display_df = pd.concat([baseline_df, pruned_k_df])
 
         # Select identifier columns and all metric columns
-        cols = ["model_type", "dataset_size"] + metrics
+        cols = ["model_type", "dataset_size"] + all_metrics
         final_table = combined_display_df[cols].copy()
 
-        # Formatting: Change '0' dataset size to 'N/A' for baselines
         final_table.loc[
             final_table["model_type"] != ModelType.ADAPTER.value, "dataset_size"
         ] = NAN_RESULT
 
-        # Save as Markdown
-        with open(table_path / "summary_report.md", "w") as f:
-            f.write(f"# Experiment Summary: Top-{k} Features\n\n")
-            f.write(final_table.to_markdown(index=False, floatfmt=".4f"))
-
+        final_table.to_csv(table_path / "summary_report.csv", index=False)
         final_table.to_parquet(table_path / "summary_report.parquet")
 
     print(

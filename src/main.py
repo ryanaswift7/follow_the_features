@@ -1,12 +1,12 @@
 import argparse
 import json
 
-from analysis import aggregate_results, plot_experiment_results
-from null_dists import generate_and_analyze_null_dists
+from src.analysis import aggregate_results, plot_experiment_results
 from src.eval import run_baseline_evals, run_eval
+from src.null_dists import generate_and_analyze_null_dists
 from src.prune import run_prune
+from src.schemas.suite import SuiteConfig
 from src.sft import run_sft
-from src.suite_cfg_schema import SuiteConfig
 from src.utils.constants import (
     DATASET_CONFIG_FILENAME,
     EVAL_CONFIG_FILENAME,

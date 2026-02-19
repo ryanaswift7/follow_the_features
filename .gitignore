@@ -13,6 +13,10 @@ wheels/
 mvp/*gemma*
 results/
 experiments/
+experiments.old/
 
 # vscode settings
 .vscode/
+
+# HF trainers
+trainer_output/

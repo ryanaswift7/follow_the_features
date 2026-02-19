@@ -2,8 +2,7 @@ import gc
 import heapq
 import json
 import os
-from functools import partial
-from typing import Literal, Optional
+from typing import Literal, Optional, cast
 
 import torch
 from datasets import load_dataset
@@ -13,7 +12,7 @@ from tqdm.auto import tqdm
 from transformer_lens import HookedTransformer
 from transformers import AutoTokenizer
 
-from src.suite_cfg_schema import SuiteConfig
+from src.schemas.suite import SuiteConfig
 from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
 
 
@@ -37,8 +36,8 @@ def estimate_vasicek_entropy_vectorized(
     Formula: H(X) = 1/n * sum( ln( n/2m * (x_{i+m} - x_{i-m}) ) )
     """
     # 1. Robust Filtering & Casting
-    # Ensure float32 for log stability (activations often come in as float16)
-    if activations.dtype == torch.float16:
+    # Ensure float32 for log stability (activations often come in as bfloat16)
+    if activations.dtype == torch.bfloat16:
         activations = activations.float()
 
     # Filter zeros to analyze the active distribution only
@@ -95,6 +94,7 @@ def get_topk_features(
     hook_name,
     layer_idx,
     k,
+    divide_by_entropy: bool,
     max_entropy_samples: int = 50_000,
     device="cuda",
 ):
@@ -103,17 +103,17 @@ def get_topk_features(
     (Magnitude-Weighted Frequency * Decoder Norm) / Differential Entropy.
 
     Args:
-        max_entropy_samples: Defaults to 100,000.
-                             (16k features * 100k samples * 2 bytes ≈ 3.2 GB RAM)
+        max_entropy_samples: Defaults to 50,000.
+                             (16k features * 50k samples * 2 bytes ≈ 1.6 GB RAM)
     """
 
     # Initialize trackers
     d_sae = sae.cfg.d_sae
     feature_sum = torch.zeros(d_sae, device="cpu", dtype=torch.float32)
 
-    # MEMORY FIX: Pre-allocate a float16 tensor for samples
+    # MEMORY FIX: Pre-allocate a bfloat16 tensor for samples
     sample_buffer = torch.zeros(
-        (d_sae, max_entropy_samples), dtype=torch.float16, device="cpu"
+        (d_sae, max_entropy_samples), dtype=torch.bfloat16, device="cpu"
     )
     sample_counts = torch.zeros(d_sae, dtype=torch.long, device="cpu")
 
@@ -142,8 +142,10 @@ def get_topk_features(
             rms = torch.sqrt(torch.mean(flat_acts**2, dim=-1, keepdim=True) + 1e-8)
             scaled_acts = flat_acts / rms
 
-            # Encode and move to CPU immediately as float16
-            feature_acts = sae.encode(scaled_acts).to(dtype=torch.float16, device="cpu")
+            # Encode and move to CPU immediately as bfloat16
+            feature_acts = sae.encode(scaled_acts).to(
+                dtype=torch.bfloat16, device="cpu"
+            )
 
             # Accumulate Sum (cast to float32 for precision in summation)
             feature_sum += feature_acts.to(torch.float32).sum(dim=0)
@@ -191,15 +193,19 @@ def get_topk_features(
     for i in tqdm(range(d_sae), desc="Calculating Entropy"):
         mwf = feature_sum[i] / total_samples_processed
 
-        count = sample_counts[i].item()
-        if count > 0:
-            # Slice only the valid samples from the buffer and cast to float32 for math
-            acts_tensor = sample_buffer[i, :count].to(torch.float32)
-            h = estimate_vasicek_entropy(acts_tensor)
-        else:
-            h = 1.0
+        # set default value for entropy
+        h_clipped = 1.0
 
-        h_clipped = max(h, 0.01)
+        if divide_by_entropy:
+            count = sample_counts[i].item()
+            if count > 0:
+                # Slice only the valid samples from the buffer and cast to float32 for math
+                acts_tensor = sample_buffer[i, :count].to(torch.float32)
+                h = cast(float, estimate_vasicek_entropy(acts_tensor))
+            else:
+                h = 1.0
+            h_clipped = max(h, 0.01)
+
         final_importance[i] = (mwf * decoder_norms[i]) / h_clipped
 
     top_values, top_indices = torch.topk(final_importance, k)
@@ -354,7 +360,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     print(f"--- Prune: dataset_size={dataset_size}, topk={topk} ---")
     tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
     model = HookedTransformer.from_pretrained_no_processing(
-        model_id, device=device, dtype=torch.float16
+        model_id, device=device, dtype=torch.bfloat16
     )
     sae, _, _ = SAE.from_pretrained_with_cfg_and_sparsity(
         release=sae_release, sae_id=sae_id, device=device
@@ -364,7 +370,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
         dataset = dataset.select(range(num_samples))
 
     dataset = dataset.map(
-        partial(apply_chat_formatting_with_tokenizer, tokenizer=tokenizer),
+        lambda examples: apply_chat_formatting_with_tokenizer(tokenizer, examples),
         batched=True,
         batch_size=batch_size,
     )
@@ -381,6 +387,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
         layer_idx,
         k=topk,
         device=device,
+        divide_by_entropy=suite.prune.cfg.divide_by_entropy,
     )
 
     sample_selection_dataloader = torch.utils.data.DataLoader(
