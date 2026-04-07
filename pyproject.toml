@@ -32,3 +32,4 @@ package = true
 mvp = "mvp.main:main"
 fdp = "src.main:main"
 gen-ref-models = "src.reference_models:main"
+gen-sni-data = "src.utils.sni_data_gen:main"

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional, cast
 
 import torch
-from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.reference_models import generate_reference_models
@@ -28,7 +27,10 @@ def run_eval(
 ):
     model_id = suite.sft.cfg.base_model_id
 
-    tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
+    # need to enable mistral tokenizer fix to use tokenizer in vllm
+    tokenizer = AutoTokenizer.from_pretrained(
+        suite.sft.cfg.tokenizer_id, fix_mistral_regex=True
+    )
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto", torch_dtype=torch.bfloat16
     )
@@ -41,8 +43,8 @@ def run_eval(
             dataset_size=cast(int, dataset_size), topk=cast(int, topk)
         ).as_posix()
         print(f"Loading Adapter: {adapter_path}")
-        model = PeftModel.from_pretrained(model, adapter_path)
-        model = model.merge_and_unload()
+        model = AutoModelForCausalLM.from_pretrained(adapter_path, device_map="auto")
+        # model = model.merge_and_unload()
 
     eval_and_save(
         model=model,

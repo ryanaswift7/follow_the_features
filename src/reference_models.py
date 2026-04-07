@@ -70,7 +70,7 @@ def generate_reference_models(suite: SuiteConfig):
     models_to_train = []
     for i in range(num_ref_models):
         trial_seed = seed + i
-        trial_output_dir = suite.dirs.get_ref_model_by_seed(trial_seed)
+        trial_output_dir = suite.dirs.get_ref_model_root_by_seed(trial_seed)
         if not (
             (trial_output_dir / EVAL_RESULTS_FILENAME).exists()
             and (trial_output_dir / EVAL_CONFIG_FILENAME).exists()
@@ -116,7 +116,7 @@ def generate_reference_models(suite: SuiteConfig):
 
     for i in pbar_models:
         trial_seed = seed + i
-        trial_output_dir = suite.dirs.get_ref_model_by_seed(trial_seed)
+        trial_output_dir = suite.dirs.get_ref_model_root_by_seed(trial_seed)
         trial_output_dir.mkdir(parents=True, exist_ok=True)
 
         trial_results_path = trial_output_dir / EVAL_RESULTS_FILENAME
@@ -179,10 +179,11 @@ def generate_reference_models(suite: SuiteConfig):
             )
 
             trainer.train()
-            trainer.save_model(str(trial_output_dir))
+            merged_model = trainer.model.merge_and_unload()
+            merged_model.save_pretrained(trial_output_dir)
             tokenizer.save_pretrained(trial_output_dir)
 
-            eval_model = trainer.model
+            eval_model = merged_model
 
         # --- Evaluation Execution ---
         current_scores, cfg = eval_and_save(
@@ -196,7 +197,7 @@ def generate_reference_models(suite: SuiteConfig):
             ref_model_seed=trial_seed,
         )
 
-        all_trials_scores.append(current_scores)
+        all_trials_scores.append(current_scores["lm_eval_results"])
 
         # Cleanup memory
         del eval_model
@@ -211,24 +212,21 @@ def generate_reference_models(suite: SuiteConfig):
 
     if all_trials_scores:
         keys = all_trials_scores[0].keys()
-
         for key in keys:
             values = [trial.get(key) for trial in all_trials_scores if key in trial]
-
-            if values and isinstance(values[0], (int, float)):
-                final_mean_scores[key] = sum(values) / len(values)
-            else:
-                final_mean_scores[key] = values[0] if values else None
+            final_mean_scores[key] = round(sum(values) / len(values), 4)
+    
+    final_results = {"lm_eval_results": final_mean_scores}
 
     # OVERALL SAVE: Save the aggregated results so we can skip this entirely next time
     suite.dirs.reference_model_eval.mkdir(parents=True, exist_ok=True)
     with open(overall_results_path, "w") as f:
-        json.dump(final_mean_scores, f, indent=4)
+        json.dump(final_results, f, indent=4)
     with open(overall_config_path, "w") as f:
         json.dump(cfg, f, indent=4)
 
     print("[REF MODELS] Generation Complete.")
-    return final_mean_scores, cfg
+    return final_results, cfg
 
 
 def main():

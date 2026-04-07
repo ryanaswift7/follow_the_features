@@ -43,10 +43,23 @@ class Evaluator:
     def compute_perplexity(self, text):
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
-            if inputs["input_ids"].size(1) == 0:
+            # A causal LM needs at least 2 tokens to calculate next-token loss.
+            # If it's too short, we return a neutral 0.0 to avoid NaN/Inf errors.
+            if inputs["input_ids"].size(1) < 2:
                 return 0.0
+
             outputs = self.model(**inputs, labels=inputs["input_ids"])
-        return torch.exp(outputs.loss).item()
+            loss = outputs.loss
+
+        # Catch FP16 overflow that results in NaN or Inf loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            print("Warning: Model returned NaN or Inf loss. Defaulting loss to 100.0.")
+            loss = 100.0
+
+        # Clamp the loss to prevent torch.exp() from overflowing into 'inf'
+        clamped_loss = torch.clamp(loss, max=100.0)
+
+        return torch.exp(clamped_loss).item()
 
     def _query_ollama(self, eval_prompt, port, log_file):
         """Helper to send a single prompt to Ollama, extract the score, and log failures."""
@@ -92,9 +105,11 @@ class Evaluator:
         - Return -1 if Response A is strictly better.
         - Return 0 if equal.
         Output ONLY the integer score (-1, 0, or 1). DO NOT include any explanations or other text.
+        
+        [BEGIN TASK]
         """
 
-        score_reminder = "Remember: Output ONLY the integer score (-1, 0, or 1). DO NOT include any explanations or other text."
+        score_reminder = "\n[END TASK]\nRemember: Output ONLY the integer score (-1, 0, or 1). DO NOT include any explanations or other text."
 
         # Run 1: Ref=A, Gen=B
         prompt_1 = f"{base_instruction}\n[Response A]\n{reference}\n[Response B]\n{generated}\n{score_reminder}"
@@ -153,7 +168,7 @@ class Evaluator:
                     "rouge_l": self.compute_rouge_l(
                         item["generation"], item["reference_metrics"]
                     ),
-                    "perplexity": self.compute_perplexity(item["generation"]),
+                    "perplexity": self.compute_perplexity(item["reference_metrics"]),
                     "judge_score": judge_score,
                 }
             )

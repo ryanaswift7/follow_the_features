@@ -1,4 +1,4 @@
-title: "base_full_gemma3_no_entropy"
+title: "base_full_gemma3"
 output_dir: "experiments"
 seed: 3
 run_null_analysis: false
@@ -33,8 +33,8 @@ eval:
     max_new_tokens: 256
     ollama_judge: "llama3.3:70b"
     num_ref_models: 3
-    tasks:
-      - leaderboard
+    tasks: null
+      # - leaderboard
     task_limit: null
   params:
     batch_size:  32

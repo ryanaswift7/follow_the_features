@@ -42,12 +42,12 @@ class SuiteDirs(BaseModel):
     @computed_field
     @property
     def results(self) -> Path:
-        return self._results_root / "main"
+        return self._ensure_dir(self._results_root / "main")
 
     @computed_field
     @property
     def null_dist_results(self) -> Path:
-        return self._results_root / "null_dist"
+        return self._ensure_dir(self._results_root / "null_dist")
 
     @computed_field
     @property
@@ -62,18 +62,20 @@ class SuiteDirs(BaseModel):
 
     @computed_field
     @property
-    def reference_model_eval(self) -> Path:
-        name = Path(self.sft_cfg.base_model_id).name
-        return self._ensure_dir(self.models / "reference_models" / name / self.ids.eval)
-
-    @computed_field
-    @property
     def reference_model_root(self) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
         return self._ensure_dir(self.models / "reference_models" / name)
 
-    def get_ref_model_by_seed(self, seed: int):
-        return self.reference_model_root / f"seed_{seed}"
+    @computed_field
+    @property
+    def reference_model_eval(self) -> Path:
+        return self._ensure_dir(self.reference_model_root / self.ids.eval)
+
+    def get_ref_model_root_by_seed(self, seed: int):
+        return self._ensure_dir(self.reference_model_root / f"seed_{seed}")
+
+    def get_ref_model_eval_by_seed(self, seed: int):
+        return self._ensure_dir(self.get_ref_model_root_by_seed(seed) / self.ids.eval)
 
     def get_dataset_path(self, dataset_size: int, topk: int) -> Path:
         """

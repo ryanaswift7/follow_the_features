@@ -8,7 +8,7 @@ class EvalConfig(BaseModel):
     max_new_tokens: int
     ollama_judge: str
     num_ref_models: int
-    tasks: List[str]
+    tasks: Optional[List[str]]
     task_limit: Optional[int]
 
 

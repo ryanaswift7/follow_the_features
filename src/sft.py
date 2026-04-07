@@ -99,7 +99,9 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     )
 
     trainer.train()
-    trainer.save_model(str(output_dir))
+    merged_model = trainer.model.merge_and_unload()
+    merged_model.save_pretrained(str(output_dir))
+    # trainer.save_model(str(output_dir))
     tokenizer.save_pretrained(output_dir)
 
     model_cfg_path = os.path.join(output_dir, MODEL_CONFIG_FILENAME)

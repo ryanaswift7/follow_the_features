@@ -106,7 +106,7 @@ def plot_experiment_results(
     all_metrics = list(ref_df.columns) + list(lm_df.columns)
 
     # Only these metrics will generate .png plots
-    PLOT_METRICS = ["average_judge_score", "leaderboard"]
+    PLOT_METRICS = ["average_judge_score", "average_perplexity", "average_lm_eval_score"]
 
     # 2. Extract Baselines (to be reused as horizontal lines in every plot)
     baseline_df = scores_df[scores_df["model_type"] != ModelType.ADAPTER.value].copy()
