@@ -7,6 +7,7 @@ class SFTConfig(BaseModel):
     max_original_samples: int
     tokenizer_id: str
     base_model_id: str
+    full_ft: bool = False
 
 
 class SFTParams(BaseModel):

@@ -1,0 +1,40 @@
+title: "olmo_ultrachat"
+output_dir: "experiments"
+seed: 3
+run_null_analysis: false
+num_null_trials: 10
+debug_mode: false
+prune:
+  cfg:
+    prune_model_id: &prune_model "google/gemma-3-270m-it"
+    sae_release: "gemma-scope-2-270m-it-res"
+    sae_id: "layer_9_width_65k_l0_medium"
+    dataset_id: "HuggingFaceH4/ultrachat_200k"
+    num_samples: &samples 207865
+    seq_agg_method: "max"  # possible values: "sum", "mean", "max"
+    feat_agg_method: "mean"  # possible values: "sum", "mean"
+    divide_by_entropy: true
+  params:
+    batch_size: 12
+    dataset_sizes: [207865]
+    topk_features: [50]
+sft:
+  cfg:
+    tokenizer_id: Qwen/Qwen3.5-9B
+    base_model_id: Qwen/Qwen3.5-9B-Base
+    max_seq_length: 8192
+    learning_rate: 0.0002
+    max_original_samples: *samples
+  params:
+    batch_size: 2
+eval:
+  cfg:
+    num_samples: 300
+    max_new_tokens: 1024
+    ollama_judge: "llama3.3:70b"
+    num_ref_models: 3
+    tasks:
+      - leaderboard
+    task_limit: null
+  params:
+    batch_size: 8  # 32

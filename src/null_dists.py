@@ -14,7 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl.trainer.sft_trainer import SFTTrainer
 
 from src.eval import eval_and_save
-from src.prune import apply_chat_formatting_with_tokenizer
+from src.prune import apply_chat_formatting_with_tokenizer_alpaca
 from src.schemas.suite import SuiteConfig
 from src.sft import PEFT_CONFIG, format_to_conversation, generate_sft_trainer_args
 from src.utils.enums import ModelType
@@ -322,7 +322,7 @@ def generate_null_distributions(suite: SuiteConfig, num_trials: int):
     print(f"[NULL-DIST] Applying chat formatting (Batch Size: {batch_size})...")
     # 'desc' adds a progress bar to the map operation
     full_ds = full_ds.map(
-        lambda examples: apply_chat_formatting_with_tokenizer(tokenizer, examples),
+        lambda examples: apply_chat_formatting_with_tokenizer_alpaca(tokenizer, examples),
         batched=True,
         batch_size=batch_size,
         desc="Tokenizing Data",

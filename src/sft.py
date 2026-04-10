@@ -76,7 +76,11 @@ def generate_sft_trainer_args(
 
 
 def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
-    print(f"[SFT] Starting SFT for dataset_size={dataset_size}, topk={topk}...")
+    # Retrieve configuration. Defaults to False if 'full_ft' is not yet in your SuiteConfig schema.
+    full_ft = getattr(suite.sft.cfg, "full_ft", False)
+    mode_str = "Full Fine-Tuning" if full_ft else "PEFT/LoRA"
+    
+    print(f"[SFT] Starting {mode_str} for dataset_size={dataset_size}, topk={topk}...")
 
     model_id = suite.sft.cfg.base_model_id
     tokenizer_id = suite.sft.cfg.tokenizer_id
@@ -90,18 +94,31 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
         model_id, device_map="auto", torch_dtype=torch.bfloat16
     )
 
-    trainer = SFTTrainer(
-        model=model,
-        args=generate_sft_trainer_args(suite=suite, output_dir=output_dir),
-        train_dataset=dataset,
-        peft_config=PEFT_CONFIG,
-        processing_class=tokenizer,
-    )
+    # Base trainer arguments
+    trainer_kwargs = {
+        "model": model,
+        "args": generate_sft_trainer_args(suite=suite, output_dir=output_dir),
+        "train_dataset": dataset,
+        "processing_class": tokenizer,
+    }
+
+    # Conditionally add PEFT config if we are NOT doing full fine-tuning
+    if not full_ft:
+        trainer_kwargs["peft_config"] = PEFT_CONFIG
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     trainer.train()
-    merged_model = trainer.model.merge_and_unload()
-    merged_model.save_pretrained(str(output_dir))
-    # trainer.save_model(str(output_dir))
+
+    # Save logic depends on the tuning methodology
+    if not full_ft:
+        # For PEFT, we merge the adapter weights back into the base model before saving
+        merged_model = trainer.model.merge_and_unload()
+        merged_model.save_pretrained(str(output_dir))
+    else:
+        # For Full FT, the model is already updated directly
+        trainer.save_model(str(output_dir))
+        
     tokenizer.save_pretrained(output_dir)
 
     model_cfg_path = os.path.join(output_dir, MODEL_CONFIG_FILENAME)
@@ -112,9 +129,11 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     with open(model_cfg_path, "w") as f:
         json.dump(model_cfg, f, indent=4)
 
-    # Only remove checkpoint directories if final model file exists
-    final_model_path = os.path.join(output_dir, "adapter_model.safetensors")
-    if os.path.isfile(final_model_path):
+    # Cleanup checkpoints: Full FT saves 'model.safetensors', LoRA saves 'adapter_model.safetensors'
+    lora_model_path = os.path.join(output_dir, "adapter_model.safetensors")
+    full_model_path = os.path.join(output_dir, "model.safetensors")
+    
+    if os.path.isfile(lora_model_path) or os.path.isfile(full_model_path):
         for item in os.listdir(output_dir):
             if item.startswith("checkpoint-"):
                 checkpoint_path = os.path.join(output_dir, item)

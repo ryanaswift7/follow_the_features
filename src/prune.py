@@ -332,16 +332,66 @@ def get_top_sample_indices(
     return [idx for score, idx in top_heap]
 
 
-def apply_chat_formatting_with_tokenizer(tokenizer, examples):
+def format_alpaca(tokenizer, examples, is_inference=False):
     formatted_texts = []
-    for inst, inp in zip(examples["instruction"], examples["input"]):
-        conversation = [{"role": "user", "content": f"{inst}\n{inp}" if inp else inst}]
+    # Using .get() with defaults safely handles Alpaca variants missing the 'input' column
+    instructions = examples.get("instruction", [])
+    inputs = examples.get("input", [""] * len(instructions))
+    outputs = examples.get("output", [""] * len(instructions))
+    
+    for inst, inp, out in zip(instructions, inputs, outputs):
+        # Construct user prompt
+        content = f"{inst}\n{inp}".strip()
+        conversation = [{"role": "user", "content": content}]
+        
+        # Append assistant response if we are training
+        if not is_inference and out:
+            conversation.append({"role": "assistant", "content": out})
+            
         text = tokenizer.apply_chat_template(
-            conversation, tokenize=False, add_generation_prompt=True
+            conversation, tokenize=False, add_generation_prompt=is_inference
         )
         formatted_texts.append(text)
     return {"formatted_text": formatted_texts}
 
+
+def format_standard_messages(tokenizer, examples, is_inference=False):
+    """
+    Works for any dataset with a native 'messages' column containing 
+    standard OpenAI-style dicts (role, content). 
+    Supports: Dolci, UltraChat, and many modern HF datasets.
+    """
+    formatted_texts = []
+    for messages in examples["messages"]:
+        prompt_messages = messages
+        
+        # Strip final assistant turn if doing inference to leave an open prompt
+        if is_inference and len(messages) > 0 and messages[-1]["role"] == "assistant":
+            prompt_messages = messages[:-1]
+            
+        text = tokenizer.apply_chat_template(
+            prompt_messages, tokenize=False, add_generation_prompt=is_inference
+        )
+        formatted_texts.append(text)
+    return {"formatted_text": formatted_texts}
+
+
+def get_formatting_function(dataset_id: str):
+    """
+    Returns a formatting function tailored to the specific dataset structure.
+    """
+    dataset_id_lower = dataset_id.lower()
+    
+    # Map keywords from the dataset repo name to the correct function
+    if "alpaca" in dataset_id_lower:
+        return format_alpaca
+    elif "dolci" in dataset_id_lower or "ultrachat" in dataset_id_lower:
+        return format_standard_messages
+    else:
+        raise ValueError(
+            f"Unsupported dataset ID '{dataset_id}'. "
+            "Please add a custom parser for this dataset structure."
+        )
 
 def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     print(f"[PRUNE] Starting pruning for dataset_size={dataset_size}, topk={topk}...")
@@ -365,12 +415,19 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     sae, _, _ = SAE.from_pretrained_with_cfg_and_sparsity(
         release=sae_release, sae_id=sae_id, device=device
     )
-    dataset = load_dataset(dataset_id, split="train")
+    if "ultrachat" in dataset_id:
+        # handle different split name in ultrachat 200k
+        dataset = load_dataset(dataset_id, split="train_sft")
+    else:
+        dataset = load_dataset(dataset_id, split="train")
+
     if num_samples is not None and num_samples < len(dataset):
         dataset = dataset.select(range(num_samples))
 
+    formatter_func = get_formatting_function(dataset_id)
+
     dataset = dataset.map(
-        lambda examples: apply_chat_formatting_with_tokenizer(tokenizer, examples),
+        lambda examples: formatter_func(tokenizer, examples, is_inference=False),
         batched=True,
         batch_size=batch_size,
     )

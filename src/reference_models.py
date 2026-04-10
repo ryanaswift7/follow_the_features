@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl.trainer.sft_trainer import SFTTrainer
 
-from src.prune import apply_chat_formatting_with_tokenizer
+from src.prune import apply_chat_formatting_with_tokenizer_alpaca
 from src.schemas.suite import SuiteConfig
 from src.sft import PEFT_CONFIG, format_to_conversation, generate_sft_trainer_args
 from src.utils.constants import EVAL_CONFIG_FILENAME, EVAL_RESULTS_FILENAME
@@ -92,7 +92,7 @@ def generate_reference_models(suite: SuiteConfig):
 
         print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
         full_ds = full_ds.map(
-            lambda examples: apply_chat_formatting_with_tokenizer(tokenizer, examples),
+            lambda examples: apply_chat_formatting_with_tokenizer_alpaca(tokenizer, examples),
             batched=True,
             batch_size=batch_size,
             desc="Tokenizing Data",

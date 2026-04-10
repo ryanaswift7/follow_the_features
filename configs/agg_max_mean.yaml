@@ -1,4 +1,4 @@
-title: "agg_mean_mean"
+title: "agg_mean_mean"  # "agg_max_mean"
 output_dir: "experiments"
 seed: 3
 run_null_analysis: false
