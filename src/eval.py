@@ -17,6 +17,7 @@ from src.utils.constants import (
 )
 from src.utils.enums import ModelType
 from src.utils.evals import eval_and_save
+from utils.ensure_pad_token import ensure_pad_token
 
 
 def run_eval(
@@ -108,6 +109,7 @@ def verify_or_run_baseline(
         model = AutoModelForCausalLM.from_pretrained(
             model_id, device_map="auto", torch_dtype=torch.bfloat16
         )
+        model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
 
         eval_and_save(
             model=model,
