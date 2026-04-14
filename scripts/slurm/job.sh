@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --account=<xiangren_1854>
+#SBATCH --account=xiangren_1854
 #SBATCH --job-name=llama_662
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
