@@ -16,7 +16,7 @@ dependencies = [
     "pyyaml",
     "matplotlib",
     "seaborn>=0.13.2",
-    "vllm>=0.15.1",
+    "vllm<0.15.0",
     "lm-eval[ifeval,math,sentencepiece]>=0.4.11",
     "langdetect>=1.0.9",
     "immutabledict>=4.3.1",
