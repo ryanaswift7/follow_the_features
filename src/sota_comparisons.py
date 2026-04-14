@@ -14,7 +14,8 @@ from src.utils.sota.s2l import S2LConsensusEngine
 
 def llama2_comps(suite: SuiteConfig):
     rows = []
-    LLAMA2_BASE_MODEL = "meta-llama/Llama-2-13b"
+    # LLAMA2_BASE_MODEL = "meta-llama/Llama-2-13b-hf"
+    # TOKENIZER
     LLAMA2_SOTA_MODELS = [
         "WizardLMTeam/WizardLM-13B-V1.2",
         "lmsys/vicuna-13b-v1.5",
@@ -23,10 +24,10 @@ def llama2_comps(suite: SuiteConfig):
         "allenai/tulu-2-13b",
     ]
 
-    tokenizer = AutoTokenizer.from_pretrained(LLAMA2_BASE_MODEL)
 
     for model_name in LLAMA2_SOTA_MODELS:
         model = AutoModel.from_pretrained(model_name, device_map="auto")
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
         sota_results, sota_cfg = eval_and_save(
             model=model,
             tokenizer=tokenizer,
@@ -42,6 +43,7 @@ def llama2_comps(suite: SuiteConfig):
     sota_df = pd.DataFrame(rows)
     sota_df.to_csv(suite.dirs.results / "sota" / "llama2_comps.csv")
     sota_df.to_parquet(suite.dirs.results / "sota" / "llama2_comps.parquet")
+    sota_df.to_markdown(suite.dirs.results / "sota" / "llama2_comps.md")
     print(sota_df)
 
 """
@@ -114,6 +116,7 @@ def parse_args():
 
 def main(suite: SuiteConfig):
     llama2_comps(suite=suite)
+    # modern_comps(suite=suite)
 
 if __name__ == "__main__":
     args = parse_args()

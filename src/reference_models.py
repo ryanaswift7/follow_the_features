@@ -8,12 +8,13 @@ from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl.trainer.sft_trainer import SFTTrainer
 
-from src.prune import apply_chat_formatting_with_tokenizer_alpaca
+from src.prune import get_formatting_function
 from src.schemas.suite import SuiteConfig
 from src.sft import PEFT_CONFIG, format_to_conversation, generate_sft_trainer_args
 from src.utils.constants import EVAL_CONFIG_FILENAME, EVAL_RESULTS_FILENAME
 from src.utils.enums import ModelType
 from src.utils.evals import eval_and_save
+from src.utils.ensure_pad_token import ensure_pad_token
 
 
 def parse_args():
@@ -90,9 +91,12 @@ def generate_reference_models(suite: SuiteConfig):
 
         full_ds_len = len(full_ds)
 
+        formatter_func = get_formatting_function(dataset_id)
+
+
         print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
         full_ds = full_ds.map(
-            lambda examples: apply_chat_formatting_with_tokenizer_alpaca(tokenizer, examples),
+            lambda examples: formatter_func(tokenizer, examples, is_inference=False),
             batched=True,
             batch_size=batch_size,
             desc="Tokenizing Data",
@@ -165,10 +169,12 @@ def generate_reference_models(suite: SuiteConfig):
                 base_model_id, device_map="auto", torch_dtype=torch.bfloat16
             )
 
+            eval_model, tokenizer = ensure_pad_token(model=eval_model, tokenizer=tokenizer)
+
             trainer_args = generate_sft_trainer_args(
                 suite=suite, output_dir=str(trial_output_dir)
             )
-            trainer_args.disable_tqdm = True
+            # trainer_args.disable_tqdm = True
 
             trainer = SFTTrainer(
                 model=eval_model,

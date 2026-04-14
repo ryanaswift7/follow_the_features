@@ -1,4 +1,7 @@
-title: "agg_mean_mean"  # "agg_max_mean"
+ # supposed to be "agg_max_mean" but I forgot
+ # to change the title and now the exps are saved
+ # under "agg_mean_mean"
+title: "agg_mean_mean"
 output_dir: "experiments"
 seed: 3
 run_null_analysis: false
@@ -17,7 +20,7 @@ prune:
   params:
     batch_size: 12
     dataset_sizes: [10000, 51760]  # [500, 5000, 10000, 20000, 51760]
-    topk_features: [1, 5, 10, 50, 100, 150, 200]
+    topk_features: [1, 5, 10, 50]  # , 100, 150, 200]
 sft:
   cfg:
     tokenizer_id: *prune_model

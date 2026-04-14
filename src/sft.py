@@ -14,6 +14,7 @@ from trl.trainer.sft_trainer import SFTTrainer
 
 from src.schemas.suite import SuiteConfig
 from src.utils.constants import MODEL_CONFIG_FILENAME, PRUNE_ID_KEY, SFT_ID_KEY
+from src.utils.ensure_pad_token import ensure_pad_token
 
 PEFT_CONFIG = LoraConfig(
     r=16,
@@ -93,6 +94,7 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto", torch_dtype=torch.bfloat16
     )
+    model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
 
     # Base trainer arguments
     trainer_kwargs = {
