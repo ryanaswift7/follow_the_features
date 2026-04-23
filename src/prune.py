@@ -4,6 +4,8 @@ import json
 import os
 from typing import Literal, Optional, cast
 
+
+import concurrent.futures
 import torch
 from datasets import load_dataset
 from sae_lens import SAE
@@ -86,7 +88,6 @@ def estimate_vasicek_entropy_vectorized(
 
     return entropy.item()
 
-
 def get_topk_features(
     dataloader,
     model,
@@ -98,38 +99,20 @@ def get_topk_features(
     max_entropy_samples: int = 50_000,
     device="cuda",
 ):
-    """
-    Identifies the most significant SAE features using the metric:
-    (Magnitude-Weighted Frequency * Decoder Norm) / Differential Entropy.
-
-    Args:
-        max_entropy_samples: Defaults to 50,000.
-                             (16k features * 50k samples * 2 bytes ≈ 1.6 GB RAM)
-    """
-
-    # Initialize trackers
     d_sae = sae.cfg.d_sae
     feature_sum = torch.zeros(d_sae, device="cpu", dtype=torch.float32)
 
-    # MEMORY FIX: Pre-allocate a bfloat16 tensor for samples
-    sample_buffer = torch.zeros(
-        (d_sae, max_entropy_samples), dtype=torch.bfloat16, device="cpu"
-    )
-    sample_counts = torch.zeros(d_sae, dtype=torch.long, device="cpu")
+    # Only allocate the massive buffer if we actually need it
+    if divide_by_entropy:
+        sample_buffer = torch.zeros((d_sae, max_entropy_samples), dtype=torch.bfloat16, device="cpu")
+        sample_counts = torch.zeros(d_sae, dtype=torch.long, device="cpu")
 
     total_samples_processed = 0
-
     print(f"Computing feature importance for {d_sae} features...")
 
-    # Progress Bar Setup
-    # Check if dataloader has a length (some streaming loaders don't)
     total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
 
-    # Wrap dataloader with tqdm
-    for i, batch in enumerate(
-        tqdm(dataloader, total=total_batches, desc="Processing Batches", unit="batch")
-    ):
-        # tokens = model.to_tokens(batch["formatted_text"], truncate=True).to(device)
+    for batch in tqdm(dataloader, total=total_batches, desc="Processing Batches", unit="batch"):
         tokens = model.to_tokens(batch["text"], truncate=True).to(device)
 
         with torch.no_grad():
@@ -143,71 +126,85 @@ def get_topk_features(
             rms = torch.sqrt(torch.mean(flat_acts**2, dim=-1, keepdim=True) + 1e-8)
             scaled_acts = flat_acts / rms
 
-            # Encode and move to CPU immediately as bfloat16
-            feature_acts = sae.encode(scaled_acts).to(
-                dtype=torch.bfloat16, device="cpu"
-            )
+            # Keep feature_acts on GPU for initial processing!
+            feature_acts = sae.encode(scaled_acts)
 
-            # Accumulate Sum (cast to float32 for precision in summation)
-            feature_sum += feature_acts.to(torch.float32).sum(dim=0)
+            # OPTIMIZATION 1: Sum on GPU *before* moving to CPU. 
+            # This reduces the tensor from [N, d_sae] to [d_sae], taking a fraction of a millisecond to transfer.
+            feature_sum += feature_acts.sum(dim=0).to(dtype=torch.float32, device="cpu")
             total_samples_processed += flat_acts.shape[0]
 
-            # Collect samples for entropy
-            # Find features that actually fired in this batch
-            active_mask = feature_acts > 0
-            unique_active_feats = torch.where(active_mask.any(dim=0))[0]
+            # OPTIMIZATION 2: Only collect samples if we actually need them for entropy
+            if divide_by_entropy:
+                # Find non-zero indices on the GPU to avoid transferring millions of zeros over PCIe
+                mask = feature_acts > 0
+                nonzero_indices = mask.nonzero(as_tuple=True)
+                token_idxs, feat_idxs = nonzero_indices
+                nonzero_vals = feature_acts[token_idxs, feat_idxs]
 
-            for feat_idx in unique_active_feats:
-                f_idx = feat_idx.item()
-                current_count = sample_counts[f_idx]
+                # Move ONLY the sparse, non-zero values and their feature IDs to CPU
+                feat_idxs_cpu = feat_idxs.cpu()
+                nonzero_vals_cpu = nonzero_vals.to(dtype=torch.bfloat16, device="cpu")
 
-                if current_count < max_entropy_samples:
-                    # Extract nonzero values for this feature
-                    vals = feature_acts[:, f_idx]
-                    nonzero_vals = vals[vals > 0]
+                # OPTIMIZATION 3: Vectorize grouping instead of boolean masking in a Python loop
+                if feat_idxs_cpu.numel() > 0:
+                    sort_idx = torch.argsort(feat_idxs_cpu)
+                    sorted_feats = feat_idxs_cpu[sort_idx]
+                    sorted_vals = nonzero_vals_cpu[sort_idx]
 
-                    # Determine how many we can add
-                    space_left = max_entropy_samples - current_count
-                    to_add = nonzero_vals[:space_left]
-                    num_to_add = to_add.size(0)
+                    # Find the boundaries of each feature's values in the sorted list
+                    unique_feats, counts = torch.unique_consecutive(sorted_feats, return_counts=True)
+                    split_indices = torch.cumsum(counts, dim=0)
+                    split_indices = torch.cat([torch.tensor([0], device="cpu"), split_indices])
 
-                    # Store in pre-allocated buffer
-                    sample_buffer[f_idx, current_count : current_count + num_to_add] = (
-                        to_add
-                    )
-                    sample_counts[f_idx] += num_to_add
+                    # Fast assignment loop
+                    for idx_in_unique, f_idx_tensor in enumerate(unique_feats):
+                        f_idx = f_idx_tensor.item()
+                        current_count = sample_counts[f_idx].item()
 
-        # Cleanup
-        del tokens, acts, flat_acts, scaled_acts, feature_acts
+                        if current_count < max_entropy_samples:
+                            # Slice directly using the pre-computed boundaries
+                            start = split_indices[idx_in_unique].item()
+                            end = split_indices[idx_in_unique + 1].item()
+                            
+                            space_left = max_entropy_samples - current_count
+                            to_add = sorted_vals[start:end][:space_left]
+                            num_to_add = to_add.size(0)
 
-        # Periodic Garbage Collection (every 10 batches to keep VRAM clean)
-        if i % 10 == 0:
-            torch.cuda.empty_cache()
-            gc.collect()
+                            sample_buffer[f_idx, current_count : current_count + num_to_add] = to_add
+                            sample_counts[f_idx] += num_to_add
+
+            # We explicitly REMOVED gc.collect() and empty_cache(). 
+            # PyTorch's caching allocator will handle memory reuse perfectly here.
 
     # --- Final Calculation ---
     print("\nCalculating Entropy and Importance Scores...")
     decoder_norms = torch.norm(sae.W_dec, p=2, dim=-1).cpu()
     final_importance = torch.zeros(d_sae)
 
-    # Use tqdm for the final calculation as well
-    for i in tqdm(range(d_sae), desc="Calculating Entropy"):
+    # OPTIMIZATION 4: Parallelize the entropy calculation
+    def compute_single_importance(i):
         mwf = feature_sum[i] / total_samples_processed
-
-        # set default value for entropy
         h_clipped = 1.0
 
         if divide_by_entropy:
             count = sample_counts[i].item()
             if count > 0:
-                # Slice only the valid samples from the buffer and cast to float32 for math
                 acts_tensor = sample_buffer[i, :count].to(torch.float32)
                 h = cast(float, estimate_vasicek_entropy(acts_tensor))
             else:
                 h = 1.0
             h_clipped = max(h, 0.01)
 
-        final_importance[i] = (mwf * decoder_norms[i]) / h_clipped
+        return i, (mwf * decoder_norms[i]) / h_clipped
+
+    # Use ThreadPoolExecutor to crunch the entropy math across all CPU cores
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = {executor.submit(compute_single_importance, i): i for i in range(d_sae)}
+        
+        for future in tqdm(concurrent.futures.as_completed(futures), total=d_sae, desc="Calculating Entropy"):
+            i, importance_val = future.result()
+            final_importance[i] = importance_val
 
     top_values, top_indices = torch.topk(final_importance, k)
 
@@ -334,19 +331,23 @@ def get_top_sample_indices(
 
 
 def format_alpaca(tokenizer, examples, is_inference=False):
-    formatted_texts = []
-    
     # Safely get columns, defaulting to empty strings if missing
-    instructions = examples.get("instruction", [""] * len(examples.get("output", [])))
-    inputs = examples.get("input", [""] * len(instructions))
-    outputs = examples.get("output", [""] * len(instructions))
+    length = len(examples.get("output", examples.get("instruction", [])))
+    instructions = examples.get("instruction", [""] * length)
+    inputs = examples.get("input", [""] * length)
+    outputs = examples.get("output", [""] * length)
+    
+    batch_conversations = []
     
     for inst, inp, out in zip(instructions, inputs, outputs):
+        inst_stripped = inst.strip()
+        inp_stripped = inp.strip()
+        
         # Prepend instruction before the user input
-        if inp.strip():
-            user_content = f"{inst.strip()}\n\n{inp.strip()}"
+        if inp_stripped:
+            user_content = f"{inst_stripped}\n\n{inp_stripped}"
         else:
-            user_content = inst.strip()
+            user_content = inst_stripped
             
         conversation = [{"role": "user", "content": user_content}]
         
@@ -354,24 +355,26 @@ def format_alpaca(tokenizer, examples, is_inference=False):
         if not is_inference and out:
             conversation.append({"role": "assistant", "content": out.strip()})
             
-        text = tokenizer.apply_chat_template(
-            conversation, tokenize=False, add_generation_prompt=is_inference
-        )
-        formatted_texts.append(text)
+        batch_conversations.append(conversation)
         
-    # Return exactly "text" so TRL doesn't trigger legacy prompt/completion logic
+    # Apply template to the ENTIRE batch at once
+    formatted_texts = tokenizer.apply_chat_template(
+        batch_conversations, 
+        tokenize=False, 
+        add_generation_prompt=is_inference
+    )
+        
     return {"text": formatted_texts}
 
 
 def format_standard_messages(tokenizer, examples, is_inference=False):
-    formatted_texts = []
-    
-    # Check if we have top-level prompts or instructions to prepend
     has_prompt = "prompt" in examples
     has_instruction = "instruction" in examples
     
+    batch_conversations = []
+    
     for i, messages in enumerate(examples["messages"]):
-        # Create a copy so we don't mutate the original dictionary in-place
+        # Create a shallow copy of the message list
         prompt_messages = list(messages)
         
         # Gather anything that needs to be prepended
@@ -382,22 +385,29 @@ def format_standard_messages(tokenizer, examples, is_inference=False):
             prepends.append(examples["prompt"][i].strip())
             
         # Prepend to the first user message
-        if prepends and len(prompt_messages) > 0 and prompt_messages[0]["role"] == "user":
+        if prepends and prompt_messages and prompt_messages[0]["role"] == "user":
             combined_prepend = "\n\n".join(prepends)
             current_content = prompt_messages[0]["content"]
             
-            # Safeguard: Don't prepend if the text is already identical (like in UltraChat)
+            # Safeguard: Don't prepend if the text is already identical
             if combined_prepend not in current_content:
-                prompt_messages[0]["content"] = f"{combined_prepend}\n\n{current_content}"
+                # Create a new dict for the modified message to avoid mutating original
+                first_msg = prompt_messages[0].copy()
+                first_msg["content"] = f"{combined_prepend}\n\n{current_content}"
+                prompt_messages[0] = first_msg
         
         # Strip final assistant turn if doing inference
-        if is_inference and len(prompt_messages) > 0 and prompt_messages[-1]["role"] == "assistant":
+        if is_inference and prompt_messages and prompt_messages[-1]["role"] == "assistant":
             prompt_messages = prompt_messages[:-1]
             
-        text = tokenizer.apply_chat_template(
-            prompt_messages, tokenize=False, add_generation_prompt=is_inference
-        )
-        formatted_texts.append(text)
+        batch_conversations.append(prompt_messages)
+            
+    # Apply template to the ENTIRE batch at once
+    formatted_texts = tokenizer.apply_chat_template(
+        batch_conversations, 
+        tokenize=False, 
+        add_generation_prompt=is_inference
+    )
         
     return {"text": formatted_texts}
 
@@ -456,8 +466,8 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
         lambda examples: formatter_func(tokenizer, examples, is_inference=False),
         batched=True,
         batch_size=1000,  # batch_size,
-        num_procs=12,
-        
+        num_proc=12,
+
     )
     feature_selection_dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size
