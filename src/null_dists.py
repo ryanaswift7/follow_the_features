@@ -16,7 +16,7 @@ from trl.trainer.sft_trainer import SFTTrainer
 from src.eval import eval_and_save
 from src.prune import get_formatting_function
 from src.schemas.suite import SuiteConfig
-from src.sft import PEFT_CONFIG, format_to_conversation, generate_sft_trainer_args
+from src.sft import PEFT_CONFIG, generate_sft_trainer_args
 from src.utils.enums import ModelType
 from src.utils.reproducibility import enforce_reproducibility
 

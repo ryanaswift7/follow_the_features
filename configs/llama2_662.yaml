@@ -27,15 +27,15 @@ sft:
     max_original_samples: *samples
     full_ft: false
   params:
-    batch_size: 24
+    batch_size: 2
 eval:
   cfg:
     num_samples: 300
-    max_new_tokens: 1024
-    ollama_judge: "llama3.3:70b"
+    max_new_tokens: 256
+    ollama_judge: "gemma3:27b-it-qat"
     num_ref_models: 1
-    tasks:
-      - leaderboard
+    tasks: null
+      # - leaderboard
     task_limit: null
   params:
-    batch_size: 12  # 32
+    batch_size: 2  # 32

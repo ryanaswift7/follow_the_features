@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Optional, Union
 
+from src.prune import get_formatting_function
 import torch
 from datasets import load_from_disk
 from peft import LoraConfig
@@ -34,17 +35,17 @@ PEFT_CONFIG = LoraConfig(
 )
 
 
-def format_to_conversation(sample):
-    user_prompt = sample["instruction"]
-    if sample.get("input", ""):
-        user_prompt += f"\n{sample['input']}"
+# def format_to_conversation(sample):
+#     user_prompt = sample["instruction"]
+#     if sample.get("input", ""):
+#         user_prompt += f"\n{sample['input']}"
 
-    return {
-        "messages": [
-            {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": sample["output"]},
-        ]
-    }
+#     return {
+#         "messages": [
+#             {"role": "user", "content": user_prompt},
+#             {"role": "assistant", "content": sample["output"]},
+#         ]
+#     }
 
 
 def generate_sft_trainer_args(
@@ -57,7 +58,7 @@ def generate_sft_trainer_args(
 
     return SFTConfig(
         output_dir=output_dir,
-        dataset_text_field="messages",
+        dataset_text_field="text",
         max_length=max_seq_length,
         num_train_epochs=1,
         per_device_train_batch_size=batch_size,
@@ -87,14 +88,26 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     tokenizer_id = suite.sft.cfg.tokenizer_id
     dataset_path = suite.dirs.get_dataset_path(dataset_size, topk)
     output_dir = suite.dirs.get_trained_model_root(dataset_size, topk)
+    dataset_id = suite.prune.cfg.dataset_id
+    batch_size = suite.prune.params.batch_size
 
     dataset = load_from_disk(dataset_path)
-    dataset = dataset.map(format_to_conversation, remove_columns=dataset.column_names)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+    # dataset = dataset.map(format_to_conversation, remove_columns=dataset.column_names)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, fix_mistral_regex=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto", torch_dtype=torch.bfloat16
     )
     model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+
+    formatter_func = get_formatting_function(dataset_id)
+    dataset = dataset.map(
+        lambda examples: formatter_func(tokenizer=tokenizer, examples=examples, is_inference=False),
+        batched=True,
+        batch_size=batch_size,
+        desc="Tokenizing Data",
+        remove_columns=dataset.column_names,
+    )
+
 
     # Base trainer arguments
     trainer_kwargs = {

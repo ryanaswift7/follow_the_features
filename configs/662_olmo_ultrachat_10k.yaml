@@ -1,0 +1,41 @@
+title: "662_olmo_ultrachat_40k"
+output_dir: "experiments"
+seed: 3
+run_null_analysis: false
+num_null_trials: 10
+debug_mode: false
+prune:
+  cfg:
+    prune_model_id: &prune_model "google/gemma-3-270m-it"
+    sae_release: "gemma-scope-2-270m-it-res"
+    sae_id: "layer_9_width_65k_l0_medium"
+    dataset_id: "HuggingFaceH4/ultrachat_200k"
+    num_samples: &samples 207865
+    seq_agg_method: "sum"  # possible values: "sum", "mean", "max"
+    feat_agg_method: "sum"  # possible values: "sum", "mean"
+    divide_by_entropy: true
+  params:
+    batch_size: 12
+    dataset_sizes: [40000]
+    topk_features: [5]
+sft:
+  cfg:
+    tokenizer_id: allenai/Olmo-3-7B-Instruct-SFT
+    base_model_id: allenai/Olmo-3-1025-7B
+    max_seq_length: 2048
+    learning_rate: 0.0002
+    max_original_samples: *samples
+    full_ft: false
+  params:
+    batch_size: 4
+eval:
+  cfg:
+    num_samples: 300
+    max_new_tokens: 256
+    ollama_judge: "gemma3:27b-it-qat"
+    num_ref_models: 1
+    tasks: null
+      # - leaderboard
+    task_limit: null
+  params:
+    batch_size: 2  # 32

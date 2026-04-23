@@ -1,16 +1,22 @@
-def ensure_pad_token(model, tokenizer, new_pad_token="<pad>"):
+def ensure_pad_token(model, tokenizer):
     """
     Checks if a tokenizer has a pad token. If not, adds one, resizes the 
-    model's embeddings, and syncs the configurations.
+    model's embeddings, and syncs the configurations. Ensures left padding 
+    for batched generation.
 
     Args:
         model: The instantiated Hugging Face model.
         tokenizer: The instantiated Hugging Face tokenizer.
-        new_pad_token (str): The string to use for the new pad token.
 
     Returns:
         tuple: The updated (model, tokenizer).
     """
+    # Enforce left padding (crucial for decoder-only models during generation)
+    if tokenizer.padding_side != 'left':
+        print(f"🔄 Changing padding side from '{tokenizer.padding_side}' to 'left'...")
+        tokenizer.padding_side = 'left'
+
+    new_pad_token = '[PAD]'
     if tokenizer.pad_token_id is None:
         print(f"⚠️ Pad token missing. Adding '{new_pad_token}' and resizing embeddings...")
         
@@ -29,6 +35,6 @@ def ensure_pad_token(model, tokenizer, new_pad_token="<pad>"):
             
         print(f"✅ Pad token added. New ID: {tokenizer.pad_token_id}")
     else:
-        print(f"✅ Pad token already exists. ID: {tokenizer.pad_token_id}. No changes made.")
+        print(f"✅ Pad token already exists. ID: {tokenizer.pad_token_id}. No token changes made.")
         
     return model, tokenizer

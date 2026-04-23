@@ -30,36 +30,38 @@ def extract_score(text):
 
 
 class Evaluator:
-    def __init__(self, model, tokenizer, ollama_judge):
-        self.tokenizer = tokenizer
-        self.model = model
-        self.scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+    # def __init__(self, model, tokenizer, ollama_judge):
+    def __init__(self, ollama_judge):
+        # self.tokenizer = tokenizer
+        # self.model = model
+        # self.scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
         self.ollama_judge = ollama_judge
 
-    def compute_rouge_l(self, generated, reference):
-        scores = self.scorer.score(reference, generated)
-        return scores["rougeL"].fmeasure
+    # def compute_rouge_l(self, generated, reference):
+    #     scores = self.scorer.score(reference, generated)
+    #     return scores["rougeL"].fmeasure
 
-    def compute_perplexity(self, text):
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
-        with torch.no_grad():
-            # A causal LM needs at least 2 tokens to calculate next-token loss.
-            # If it's too short, we return a neutral 0.0 to avoid NaN/Inf errors.
-            if inputs["input_ids"].size(1) < 2:
-                return 0.0
+    # def compute_perplexity(self, text):
+    #     inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+    #     with torch.no_grad():
+    #         # A causal LM needs at least 2 tokens to calculate next-token loss.
+    #         # If it's too short, we return a neutral 0.0 to avoid NaN/Inf errors.
+    #         if inputs["input_ids"].size(1) < 2:
+    #             return 0.0
 
-            outputs = self.model(**inputs, labels=inputs["input_ids"])
-            loss = outputs.loss
+    #         outputs = self.model(**inputs, labels=inputs["input_ids"])
+    #         loss = outputs.loss
 
-        # Catch FP16 overflow that results in NaN or Inf loss
-        if torch.isnan(loss) or torch.isinf(loss):
-            print("Warning: Model returned NaN or Inf loss. Defaulting loss to 100.0.")
-            loss = 100.0
+    #     # Catch FP16 overflow that results in NaN or Inf loss
+    #     if torch.isnan(loss) or torch.isinf(loss):
+    #         print("Warning: Model returned NaN or Inf loss. Defaulting loss to 100.0.")
+    #         # loss = 100.0
+    #         loss = torch.tensor(100.0, device=self.model.device)
 
-        # Clamp the loss to prevent torch.exp() from overflowing into 'inf'
-        clamped_loss = torch.clamp(loss, max=100.0)
+    #     # Clamp the loss to prevent torch.exp() from overflowing into 'inf'
+    #     clamped_loss = torch.clamp(loss, max=100.0)
 
-        return torch.exp(clamped_loss).item()
+    #     return torch.exp(clamped_loss).item()
 
     def _query_ollama(self, eval_prompt, port, log_file):
         """Helper to send a single prompt to Ollama, extract the score, and log failures."""
@@ -165,10 +167,10 @@ class Evaluator:
 
             results.append(
                 {
-                    "rouge_l": self.compute_rouge_l(
-                        item["generation"], item["reference_metrics"]
-                    ),
-                    "perplexity": self.compute_perplexity(item["reference_metrics"]),
+                    # "rouge_l": self.compute_rouge_l(
+                    #     item["generation"], item["reference_metrics"]
+                    # ),
+                    # "perplexity": self.compute_perplexity(item["reference_metrics"]),
                     "judge_score": judge_score,
                 }
             )
@@ -178,15 +180,15 @@ class Evaluator:
         # Handle the edge case where every single sample failed
         if num_samples == 0:
             return {
-                "rouge_l": 0.0,
-                "perplexity": 0.0,
+                # "rouge_l": 0.0,
+                # "perplexity": 0.0,
                 "judge_score": 0.0,
                 "invalid_judge_responses": invalid_judge_responses,
             }
 
         return {
-            "rouge_l": sum(r["rouge_l"] for r in results) / num_samples,
-            "perplexity": sum(r["perplexity"] for r in results) / num_samples,
+            # "rouge_l": sum(r["rouge_l"] for r in results) / num_samples,
+            # "perplexity": sum(r["perplexity"] for r in results) / num_samples,
             "judge_score": sum(r["judge_score"] for r in results) / num_samples,
             "invalid_judge_responses": invalid_judge_responses,
         }

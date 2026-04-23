@@ -129,7 +129,8 @@ def get_topk_features(
     for i, batch in enumerate(
         tqdm(dataloader, total=total_batches, desc="Processing Batches", unit="batch")
     ):
-        tokens = model.to_tokens(batch["formatted_text"], truncate=True).to(device)
+        # tokens = model.to_tokens(batch["formatted_text"], truncate=True).to(device)
+        tokens = model.to_tokens(batch["text"], truncate=True).to(device)
 
         with torch.no_grad():
             _, cache = model.run_with_cache(
@@ -334,46 +335,71 @@ def get_top_sample_indices(
 
 def format_alpaca(tokenizer, examples, is_inference=False):
     formatted_texts = []
-    # Using .get() with defaults safely handles Alpaca variants missing the 'input' column
-    instructions = examples.get("instruction", [])
+    
+    # Safely get columns, defaulting to empty strings if missing
+    instructions = examples.get("instruction", [""] * len(examples.get("output", [])))
     inputs = examples.get("input", [""] * len(instructions))
     outputs = examples.get("output", [""] * len(instructions))
     
     for inst, inp, out in zip(instructions, inputs, outputs):
-        # Construct user prompt
-        content = f"{inst}\n{inp}".strip()
-        conversation = [{"role": "user", "content": content}]
+        # Prepend instruction before the user input
+        if inp.strip():
+            user_content = f"{inst.strip()}\n\n{inp.strip()}"
+        else:
+            user_content = inst.strip()
+            
+        conversation = [{"role": "user", "content": user_content}]
         
         # Append assistant response if we are training
         if not is_inference and out:
-            conversation.append({"role": "assistant", "content": out})
+            conversation.append({"role": "assistant", "content": out.strip()})
             
         text = tokenizer.apply_chat_template(
             conversation, tokenize=False, add_generation_prompt=is_inference
         )
         formatted_texts.append(text)
-    return {"formatted_text": formatted_texts}
+        
+    # Return exactly "text" so TRL doesn't trigger legacy prompt/completion logic
+    return {"text": formatted_texts}
 
 
 def format_standard_messages(tokenizer, examples, is_inference=False):
-    """
-    Works for any dataset with a native 'messages' column containing 
-    standard OpenAI-style dicts (role, content). 
-    Supports: Dolci, UltraChat, and many modern HF datasets.
-    """
     formatted_texts = []
-    for messages in examples["messages"]:
-        prompt_messages = messages
+    
+    # Check if we have top-level prompts or instructions to prepend
+    has_prompt = "prompt" in examples
+    has_instruction = "instruction" in examples
+    
+    for i, messages in enumerate(examples["messages"]):
+        # Create a copy so we don't mutate the original dictionary in-place
+        prompt_messages = list(messages)
         
-        # Strip final assistant turn if doing inference to leave an open prompt
-        if is_inference and len(messages) > 0 and messages[-1]["role"] == "assistant":
-            prompt_messages = messages[:-1]
+        # Gather anything that needs to be prepended
+        prepends = []
+        if has_instruction and examples["instruction"][i]:
+            prepends.append(examples["instruction"][i].strip())
+        if has_prompt and examples["prompt"][i]:
+            prepends.append(examples["prompt"][i].strip())
+            
+        # Prepend to the first user message
+        if prepends and len(prompt_messages) > 0 and prompt_messages[0]["role"] == "user":
+            combined_prepend = "\n\n".join(prepends)
+            current_content = prompt_messages[0]["content"]
+            
+            # Safeguard: Don't prepend if the text is already identical (like in UltraChat)
+            if combined_prepend not in current_content:
+                prompt_messages[0]["content"] = f"{combined_prepend}\n\n{current_content}"
+        
+        # Strip final assistant turn if doing inference
+        if is_inference and len(prompt_messages) > 0 and prompt_messages[-1]["role"] == "assistant":
+            prompt_messages = prompt_messages[:-1]
             
         text = tokenizer.apply_chat_template(
             prompt_messages, tokenize=False, add_generation_prompt=is_inference
         )
         formatted_texts.append(text)
-    return {"formatted_text": formatted_texts}
+        
+    return {"text": formatted_texts}
 
 
 def get_formatting_function(dataset_id: str):
@@ -408,7 +434,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     feat_agg_method = suite.prune.cfg.feat_agg_method
 
     print(f"--- Prune: dataset_size={dataset_size}, topk={topk} ---")
-    tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
+    tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
     model = HookedTransformer.from_pretrained_no_processing(
         model_id, device=device, dtype=torch.bfloat16
     )
@@ -429,7 +455,9 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     dataset = dataset.map(
         lambda examples: formatter_func(tokenizer, examples, is_inference=False),
         batched=True,
-        batch_size=batch_size,
+        batch_size=1000,  # batch_size,
+        num_procs=12,
+        
     )
     feature_selection_dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size
