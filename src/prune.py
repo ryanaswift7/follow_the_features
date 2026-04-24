@@ -244,7 +244,7 @@ def get_topk_features(
 
                             sample_buffer[f_idx, current_count : current_count + num_to_add] = to_add
                             sample_counts[f_idx] += num_to_add
-        break # Assuming this break is intentional for testing
+        # break # Assuming this break is intentional for testing
 
     print("\nCalculating Entropy and Importance Scores...")
     decoder_norms = torch.norm(sae.W_dec, p=2, dim=-1).cpu()
