@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from typing import Literal, Optional, cast
+import csv
 
 import concurrent.futures
 import torch
@@ -16,6 +17,7 @@ import numpy as np
 
 from src.schemas.suite import SuiteConfig
 from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
+from src.utils.feature_reports import write_full_feature_report_csv, write_topk_feature_report_json
 
 
 def estimate_vasicek_entropy(activations, window=None):
@@ -105,19 +107,90 @@ def get_topk_features(
     layer_idx,
     k,
     divide_by_entropy: bool,
+    full_report_path_csv: Path,
+    topk_report_path_json: Path,
+    llm_id: str,
+    sae_release: str,
+    sae_id: str,
     max_entropy_samples: int = 50_000,
     device="cuda",
 ):
+    # Enforce extensions for clarity
+    csv_report_path = full_report_path_csv.with_suffix('.csv')
+    json_topk_path = topk_report_path_json.with_suffix('.json')
+
+    # ==========================================
+    # 1. Check if the ranking already exists
+    # ==========================================
+    if csv_report_path.exists():
+        print(f"[CACHE] Complete feature report found at {csv_report_path}. Extracting top {k} features...")
+        
+        top_feature_indices = []
+        top_importance_raw = []
+        full_report_dict_for_topk = {"cfg": {}, "features": {}}
+        
+        # Read the CSV to reconstruct the dict for the top-k subset
+        with open(csv_report_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            count = 0
+            headers_found = False
+            
+            for row in reader:
+                if not row:
+                    continue
+                    
+                # Parse config comments
+                if row[0].startswith("#"):
+                    line = row[0][1:].strip()
+                    if ":" in line:
+                        key, val = line.split(":", 1)
+                        full_report_dict_for_topk["cfg"][key.strip()] = val.strip()
+                    continue
+                
+                # Skip the header row
+                if not headers_found:
+                    headers_found = True
+                    continue
+                
+                # Parse data rows (only need up to k)
+                if count < k:
+                    idx_str = row[0]
+                    raw_val = row[1]
+                    
+                    top_feature_indices.append(int(idx_str))
+                    top_importance_raw.append(float(raw_val))
+                    
+                    # Reconstruct the dict structure for the Top-K JSON writer
+                    full_report_dict_for_topk["features"][idx_str] = {
+                        "value": {
+                            "raw": raw_val,
+                            "norm_sum": row[2],
+                            "norm_max": row[3],
+                            "zscore": row[4],
+                        }
+                    }
+                    count += 1
+                else:
+                    break # We have our top k, stop reading the 65k CSV
+
+        # Ensure the top-k report also exists if loaded from cache
+        if not json_topk_path.exists():
+            write_topk_feature_report_json(full_report_dict_for_topk, k, json_topk_path)
+
+        return top_feature_indices, top_importance_raw
+
+    # ==========================================
+    # 2. Compute rankings (if file not found)
+    # ==========================================
     d_sae = sae.cfg.d_sae
     feature_sum = torch.zeros(d_sae, device="cpu", dtype=torch.float32)
 
-    # Only allocate the massive buffer if we actually need it
     if divide_by_entropy:
         sample_buffer = torch.zeros((d_sae, max_entropy_samples), dtype=torch.bfloat16, device="cpu")
         sample_counts = torch.zeros(d_sae, dtype=torch.long, device="cpu")
 
     total_samples_processed = 0
-    print(f"Computing feature importance for {d_sae} features...")
+    print(f"Computing feature importance for all {d_sae} features...")
 
     total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
 
@@ -131,48 +204,37 @@ def get_topk_features(
             acts = cache[hook_name]
             flat_acts = acts.reshape(-1, acts.shape[-1])
 
-            # Normalize scaling
             rms = torch.sqrt(torch.mean(flat_acts**2, dim=-1, keepdim=True) + 1e-8)
             scaled_acts = flat_acts / rms
 
-            # Keep feature_acts on GPU for initial processing!
             feature_acts = sae.encode(scaled_acts)
 
-            # OPTIMIZATION 1: Sum on GPU *before* moving to CPU. 
-            # This reduces the tensor from [N, d_sae] to [d_sae], taking a fraction of a millisecond to transfer.
             feature_sum += feature_acts.sum(dim=0).to(dtype=torch.float32, device="cpu")
             total_samples_processed += flat_acts.shape[0]
 
-            # OPTIMIZATION 2: Only collect samples if we actually need them for entropy
             if divide_by_entropy:
-                # Find non-zero indices on the GPU to avoid transferring millions of zeros over PCIe
                 mask = feature_acts > 0
                 nonzero_indices = mask.nonzero(as_tuple=True)
                 token_idxs, feat_idxs = nonzero_indices
                 nonzero_vals = feature_acts[token_idxs, feat_idxs]
 
-                # Move ONLY the sparse, non-zero values and their feature IDs to CPU
                 feat_idxs_cpu = feat_idxs.cpu()
                 nonzero_vals_cpu = nonzero_vals.to(dtype=torch.bfloat16, device="cpu")
 
-                # OPTIMIZATION 3: Vectorize grouping instead of boolean masking in a Python loop
                 if feat_idxs_cpu.numel() > 0:
                     sort_idx = torch.argsort(feat_idxs_cpu)
                     sorted_feats = feat_idxs_cpu[sort_idx]
                     sorted_vals = nonzero_vals_cpu[sort_idx]
 
-                    # Find the boundaries of each feature's values in the sorted list
                     unique_feats, counts = torch.unique_consecutive(sorted_feats, return_counts=True)
                     split_indices = torch.cumsum(counts, dim=0)
                     split_indices = torch.cat([torch.tensor([0], device="cpu"), split_indices])
 
-                    # Fast assignment loop
                     for idx_in_unique, f_idx_tensor in enumerate(unique_feats):
                         f_idx = f_idx_tensor.item()
                         current_count = sample_counts[f_idx].item()
 
                         if current_count < max_entropy_samples:
-                            # Slice directly using the pre-computed boundaries
                             start = split_indices[idx_in_unique].item()
                             end = split_indices[idx_in_unique + 1].item()
                             
@@ -182,17 +244,12 @@ def get_topk_features(
 
                             sample_buffer[f_idx, current_count : current_count + num_to_add] = to_add
                             sample_counts[f_idx] += num_to_add
+        break # Assuming this break is intentional for testing
 
-            # We explicitly REMOVED gc.collect() and empty_cache(). 
-            # PyTorch's caching allocator will handle memory reuse perfectly here.
-        break
-
-    # --- Final Calculation ---
     print("\nCalculating Entropy and Importance Scores...")
     decoder_norms = torch.norm(sae.W_dec, p=2, dim=-1).cpu()
     final_importance = torch.zeros(d_sae)
 
-    # OPTIMIZATION 4: Parallelize the entropy calculation
     def compute_single_importance(i):
         mwf = feature_sum[i] / total_samples_processed
         h_clipped = 1.0
@@ -208,36 +265,45 @@ def get_topk_features(
 
         return i, (mwf * decoder_norms[i]) / h_clipped
 
-    # Use ThreadPoolExecutor to crunch the entropy math across all CPU cores
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = {executor.submit(compute_single_importance, i): i for i in range(d_sae)}
-        
         for future in tqdm(concurrent.futures.as_completed(futures), total=d_sae, desc="Calculating Entropy"):
             i, importance_val = future.result()
-            final_importance[i] = importance_val\
+            final_importance[i] = importance_val
             
-    # 1. Get the top-k indices and raw values FIRST
-    top_importance_raw, top_feature_indices = torch.topk(final_importance, k)
+    # Sort ALL features descending
+    sorted_importance_raw, sorted_feature_indices = torch.sort(final_importance, descending=True)
 
-    # 2. Compute global statistics across the entire tensor
-    sum_val = final_importance.sum()
-    max_val = final_importance.max()
-    mean_val = final_importance.mean()
-    std_val = final_importance.std()
-
-    # 3. Apply the normalizations purely to the top-k values
-    top_importance_norm_sum = top_importance_raw / sum_val
-    top_importance_norm_max = top_importance_raw / max_val
-    top_importance_norm_z = (top_importance_raw - mean_val) / std_val
-
-    return (
-        top_feature_indices.tolist(),
-        top_importance_raw.tolist(),
-        top_importance_norm_sum.tolist(),
-        top_importance_norm_max.tolist(),
-        top_importance_norm_z.tolist(),
+    # ==========================================
+    # 3. Write out the Reports
+    # ==========================================
+    
+    # Report 1: The Complete Feature Ranking (as CSV)
+    full_report_data = write_full_feature_report_csv(
+        feat_indices=sorted_feature_indices,
+        feat_values=sorted_importance_raw,
+        total_features=d_sae,
+        llm_id=llm_id,
+        sae_release=sae_release, 
+        sae_id=sae_id,
+        hook_name=hook_name,
+        report_path=csv_report_path
     )
 
+    # Report 2: Extract Top-K into JSON
+    write_topk_feature_report_json(
+        full_report_data=full_report_data, 
+        k=k, 
+        topk_report_path=json_topk_path
+    )
+
+    # ==========================================
+    # 4. Return ONLY the requested top-k
+    # ==========================================
+    return (
+        sorted_feature_indices[:k].tolist(),
+        sorted_importance_raw[:k].tolist()
+    )
 
 def get_top_sample_indices(
     dataloader,
@@ -456,67 +522,7 @@ def get_formatting_function(dataset_id: str):
             f"Unsupported dataset ID '{dataset_id}'. "
             "Please add a custom parser for this dataset structure."
         )
-    
-def write_feature_report(
-        feat_indices,
-        feat_values,
-        feat_values_norm_sum,
-        feat_values_norm_max,
-        feat_values_norm_z,
-        k,
-        llm_id,
-        sae_release, 
-        sae_id,
-        hook_name,
-        dataset_path: Path) -> None:
-    print("[PRUNE] Creating Top-K Feature Report...")
 
-    feature_report_filename = "feature_report.json"
-    report_path = dataset_path / feature_report_filename
-    all_info = {}
-
-    cfg = {
-        "llm": llm_id,
-        "sae": {'release': sae_release, 'id': sae_id},
-        "hook_name": hook_name,
-        "num_features (k)": k,
-        "dataset_path": str(dataset_path),
-    }
-    all_info['cfg'] = cfg
-    
-    features_dict = {}
-    
-    # Convert tensors/numpy arrays to native Python types for JSON serialization
-    def stringify(x): 
-        return f"{x.item() if hasattr(x, 'item') else x:.4f}"        
-    for idx, val, snorm, mnorm, zscore in zip(
-        feat_indices,
-        feat_values,
-        feat_values_norm_sum,
-        feat_values_norm_max,
-        feat_values_norm_z):
-        
-        idx_str = stringify(idx)
-        val_float = stringify(val)
-        snorm_float = stringify(snorm)
-        mnorm_float = stringify(mnorm)
-        zscore_float = stringify(zscore)
-            
-        features_dict[idx_str] = {
-            "value": {
-                "raw": val_float,
-                "norm_sum": snorm_float,
-                "norm_max": mnorm_float,
-                "zscore": zscore_float,
-            }
-        }
-        
-    all_info['features'] = features_dict
-
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(all_info, f, indent=4)
-
-    print(f"[PRUNE] Top-K Feature Report saved to {str(report_path)}")
 
 def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     print(f"[PRUNE] Starting pruning for dataset_size={dataset_size}, topk={topk}...")
@@ -563,33 +569,22 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     )
     hook_name = sae.cfg.metadata.hook_name
     layer_idx = int(hook_name.split(".")[1])
-    (top_indices,
-     top_values,
-     top_values_norm_sum,
-     top_values_norm_max,
-     top_values_norm_z) = get_topk_features(
-        feature_selection_dataloader,
-        model,
-        sae,
-        hook_name,
-        layer_idx,
+
+    top_indices, top_values = get_topk_features(
+        dataloader=feature_selection_dataloader,
+        model=model,
+        sae=sae,
+        hook_name=hook_name,
+        layer_idx=layer_idx,
         k=topk,
         device=device,
         divide_by_entropy=suite.prune.cfg.divide_by_entropy,
-    )
-
-    write_feature_report(
-        feat_indices=top_indices,
-        feat_values=top_values,
-        feat_values_norm_sum=top_values_norm_sum,
-        feat_values_norm_max=top_values_norm_max,
-        feat_values_norm_z=top_values_norm_z,
-        k=topk,
+        full_report_path_csv=suite.dirs.datasets / "full_feature_report.csv",
+        topk_report_path_json=suite.dirs.get_dataset_path(
+            dataset_size=dataset_size, topk=topk) / "topk_feature_report.json",
         llm_id=suite.prune.cfg.prune_model_id,
         sae_release=suite.prune.cfg.sae_release,
         sae_id=suite.prune.cfg.sae_id,
-        hook_name=hook_name,
-        dataset_path=suite.dirs.get_dataset_path(dataset_size=dataset_size, topk=topk),
     )
 
 
