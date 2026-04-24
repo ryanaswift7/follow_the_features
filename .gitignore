@@ -21,3 +21,6 @@ experiments.old/
 
 # HF trainers
 trainer_output/
+
+# env vars
+.env

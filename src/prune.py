@@ -1,9 +1,8 @@
-import gc
 import heapq
 import json
 import os
+from pathlib import Path
 from typing import Literal, Optional, cast
-
 
 import concurrent.futures
 import torch
@@ -13,6 +12,7 @@ from scipy.stats import differential_entropy
 from tqdm.auto import tqdm
 from transformer_lens import HookedTransformer
 from transformers import AutoTokenizer
+import numpy as np
 
 from src.schemas.suite import SuiteConfig
 from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
@@ -21,11 +21,20 @@ from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
 def estimate_vasicek_entropy(activations, window=None):
     """
     Estimates differential entropy using the Vasicek n-spacing method.
+    Includes jitter to prevent divide-by-zero errors from duplicate values.
     """
+    # Filter for positive activations and convert to numpy
     vals = activations[activations > 0].numpy()
+    
     if len(vals) < 20:  # Minimum samples for a stable estimate
         return 1e-5
-    return differential_entropy(vals)
+        
+    # Add microscopic noise (jitter) to break exact ties
+    noise_scale = 1e-8
+    jitter = np.random.normal(0, noise_scale, size=vals.shape)
+    vals_jittered = vals + jitter
+    
+    return differential_entropy(vals_jittered)
 
 
 def estimate_vasicek_entropy_vectorized(
@@ -176,6 +185,7 @@ def get_topk_features(
 
             # We explicitly REMOVED gc.collect() and empty_cache(). 
             # PyTorch's caching allocator will handle memory reuse perfectly here.
+        break
 
     # --- Final Calculation ---
     print("\nCalculating Entropy and Importance Scores...")
@@ -204,11 +214,29 @@ def get_topk_features(
         
         for future in tqdm(concurrent.futures.as_completed(futures), total=d_sae, desc="Calculating Entropy"):
             i, importance_val = future.result()
-            final_importance[i] = importance_val
+            final_importance[i] = importance_val\
+            
+    # 1. Get the top-k indices and raw values FIRST
+    top_importance_raw, top_feature_indices = torch.topk(final_importance, k)
 
-    top_values, top_indices = torch.topk(final_importance, k)
+    # 2. Compute global statistics across the entire tensor
+    sum_val = final_importance.sum()
+    max_val = final_importance.max()
+    mean_val = final_importance.mean()
+    std_val = final_importance.std()
 
-    return top_indices.tolist(), top_values.tolist()
+    # 3. Apply the normalizations purely to the top-k values
+    top_importance_norm_sum = top_importance_raw / sum_val
+    top_importance_norm_max = top_importance_raw / max_val
+    top_importance_norm_z = (top_importance_raw - mean_val) / std_val
+
+    return (
+        top_feature_indices.tolist(),
+        top_importance_raw.tolist(),
+        top_importance_norm_sum.tolist(),
+        top_importance_norm_max.tolist(),
+        top_importance_norm_z.tolist(),
+    )
 
 
 def get_top_sample_indices(
@@ -253,10 +281,10 @@ def get_top_sample_indices(
     for i, batch in enumerate(
         tqdm(dataloader, total=total_batches, desc="Scanning Dataset", unit="batch")
     ):
-        batch_len = len(batch["formatted_text"])
+        batch_len = len(batch["text"])
         batch_indices = range(dataset_start_index, dataset_start_index + batch_len)
 
-        tokens = model.to_tokens(batch["formatted_text"], truncate=True).to(device)
+        tokens = model.to_tokens(batch["text"], truncate=True).to(device)
 
         with torch.no_grad():
             _, cache = model.run_with_cache(
@@ -428,6 +456,67 @@ def get_formatting_function(dataset_id: str):
             f"Unsupported dataset ID '{dataset_id}'. "
             "Please add a custom parser for this dataset structure."
         )
+    
+def write_feature_report(
+        feat_indices,
+        feat_values,
+        feat_values_norm_sum,
+        feat_values_norm_max,
+        feat_values_norm_z,
+        k,
+        llm_id,
+        sae_release, 
+        sae_id,
+        hook_name,
+        dataset_path: Path) -> None:
+    print("[PRUNE] Creating Top-K Feature Report...")
+
+    feature_report_filename = "feature_report.json"
+    report_path = dataset_path / feature_report_filename
+    all_info = {}
+
+    cfg = {
+        "llm": llm_id,
+        "sae": {'release': sae_release, 'id': sae_id},
+        "hook_name": hook_name,
+        "num_features (k)": k,
+        "dataset_path": str(dataset_path),
+    }
+    all_info['cfg'] = cfg
+    
+    features_dict = {}
+    
+    # Convert tensors/numpy arrays to native Python types for JSON serialization
+    def stringify(x): 
+        return f"{x.item() if hasattr(x, 'item') else x:.4f}"        
+    for idx, val, snorm, mnorm, zscore in zip(
+        feat_indices,
+        feat_values,
+        feat_values_norm_sum,
+        feat_values_norm_max,
+        feat_values_norm_z):
+        
+        idx_str = stringify(idx)
+        val_float = stringify(val)
+        snorm_float = stringify(snorm)
+        mnorm_float = stringify(mnorm)
+        zscore_float = stringify(zscore)
+            
+        features_dict[idx_str] = {
+            "value": {
+                "raw": val_float,
+                "norm_sum": snorm_float,
+                "norm_max": mnorm_float,
+                "zscore": zscore_float,
+            }
+        }
+        
+    all_info['features'] = features_dict
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(all_info, f, indent=4)
+
+    print(f"[PRUNE] Top-K Feature Report saved to {str(report_path)}")
 
 def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     print(f"[PRUNE] Starting pruning for dataset_size={dataset_size}, topk={topk}...")
@@ -474,7 +563,11 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     )
     hook_name = sae.cfg.metadata.hook_name
     layer_idx = int(hook_name.split(".")[1])
-    top_indices, top_values = get_topk_features(
+    (top_indices,
+     top_values,
+     top_values_norm_sum,
+     top_values_norm_max,
+     top_values_norm_z) = get_topk_features(
         feature_selection_dataloader,
         model,
         sae,
@@ -484,6 +577,21 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
         device=device,
         divide_by_entropy=suite.prune.cfg.divide_by_entropy,
     )
+
+    write_feature_report(
+        feat_indices=top_indices,
+        feat_values=top_values,
+        feat_values_norm_sum=top_values_norm_sum,
+        feat_values_norm_max=top_values_norm_max,
+        feat_values_norm_z=top_values_norm_z,
+        k=topk,
+        llm_id=suite.prune.cfg.prune_model_id,
+        sae_release=suite.prune.cfg.sae_release,
+        sae_id=suite.prune.cfg.sae_id,
+        hook_name=hook_name,
+        dataset_path=suite.dirs.get_dataset_path(dataset_size=dataset_size, topk=topk),
+    )
+
 
     sample_selection_dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size

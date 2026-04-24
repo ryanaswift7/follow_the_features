@@ -84,7 +84,7 @@ class SuiteDirs(BaseModel):
         that will be written by the pruning script.
         """
         name = Path(self.prune_cfg.dataset_id).name
-        return self.datasets / f"{name}_ds{dataset_size}_topk{topk}.hf"
+        return self._ensure_dir(self.datasets / f"{name}_ds{dataset_size}_topk{topk}.hf")
 
     def get_trained_model_root(self, dataset_size: int, topk: int) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
