@@ -569,7 +569,7 @@ def eval_and_save(
             ref_outputs_by_dataset, dataset_size, topk
         )
     else:
-        print("\nModel type is REFERENCE. Skipping Phases 2, 3, and 4 (Judge Evaporation).")
+        print("\nModel type is REFERENCE. Skipping Phases 2, 3, and 4 (Judge Evaluation).")
 
     # =====================================================================
     # PHASE 5: Save Configuration and Results
