@@ -20,38 +20,58 @@ from src.utils.evals import eval_and_save
 from src.utils.ensure_pad_token import ensure_pad_token
 
 
+# def run_eval(
+#     suite: SuiteConfig,
+#     model_type: ModelType,
+#     dataset_size: Optional[int] = None,
+#     topk: Optional[int] = None,
+# ):
+#     model_id = suite.sft.cfg.base_model_id
+
+
+#     if model_type == ModelType.ADAPTER:
+#         assert dataset_size is not None and topk is not None, (
+#             "dataset_size and topk must be provided for adapter evals"
+#         )
+#         adapter_path = suite.dirs.get_trained_model_root(
+#             dataset_size=cast(int, dataset_size), topk=cast(int, topk)
+#         ).as_posix()
+#         print(f"Loading Adapter: {adapter_path}")
+#         model = AutoModelForCausalLM.from_pretrained(adapter_path, device_map="auto",  dtype=torch.bfloat16)
+#         # model = model.merge_and_unload()
+#         tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
+
+#     else:
+#         # need to enable mistral tokenizer fix to use tokenizer in vllm
+#         tokenizer = AutoTokenizer.from_pretrained(
+#             suite.sft.cfg.tokenizer_id, fix_mistral_regex=True
+#         )
+#         model = AutoModelForCausalLM.from_pretrained(
+#             model_id, device_map="auto", dtype=torch.bfloat16
+#         )
+
 def run_eval(
     suite: SuiteConfig,
     model_type: ModelType,
-    dataset_size: Optional[int] = None,
-    topk: Optional[int] = None,
+    dataset_size: int,
+    topk: int
 ):
-    model_id = suite.sft.cfg.base_model_id
-
-
-    if model_type == ModelType.ADAPTER:
-        assert dataset_size is not None and topk is not None, (
-            "dataset_size and topk must be provided for adapter evals"
-        )
-        adapter_path = suite.dirs.get_trained_model_root(
-            dataset_size=cast(int, dataset_size), topk=cast(int, topk)
-        ).as_posix()
-        print(f"Loading Adapter: {adapter_path}")
-        model = AutoModelForCausalLM.from_pretrained(adapter_path, device_map="auto",  dtype=torch.bfloat16)
-        # model = model.merge_and_unload()
-        tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
-
-    else:
-        # need to enable mistral tokenizer fix to use tokenizer in vllm
-        tokenizer = AutoTokenizer.from_pretrained(
-            suite.sft.cfg.tokenizer_id, fix_mistral_regex=True
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, device_map="auto", dtype=torch.bfloat16
-        )
-
-        model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
-
+    assert dataset_size is not None and topk is not None, (
+        "dataset_size and topk must be provided for adapter evals"
+    )
+    adapter_path = suite.dirs.get_trained_model_root(
+        dataset_size=cast(int, dataset_size),
+        topk=cast(int, topk),
+    ).as_posix()
+    gen_cache_dir = suite.dirs.get_trained_model_gen_cache(
+        dataset_size=dataset_size,
+        topk=topk,
+        max_new_tokens=suite.eval.cfg.max_new_tokens,
+    )
+    print(f"Loading Adapter: {adapter_path}")
+    model = AutoModelForCausalLM.from_pretrained(adapter_path, device_map="auto",  dtype=torch.bfloat16)
+    tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
+    model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
 
     eval_and_save(
         model=model,
@@ -60,6 +80,7 @@ def run_eval(
         model_type=model_type,
         dataset_size=dataset_size,
         topk=topk,
+        gen_cache_dir=gen_cache_dir,
     )
     del model, tokenizer
     gc.collect()
@@ -124,6 +145,8 @@ def verify_or_run_baseline(
             suite=suite,
             dataset_size=None,
             topk=None,
+            gen_cache_dir=suite.dirs.get_base_model_gen_cache(
+                max_new_tokens=suite.eval.cfg.max_new_tokens),
         )
 
         # 4. Cleanup

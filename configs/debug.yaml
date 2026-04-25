@@ -1,5 +1,5 @@
 title: "debug"
-output_dir: "experiments"
+output_dir: "debugging"  # "experiments"
 seed: 3
 run_null_analysis: false
 num_null_trials: 5
@@ -16,8 +16,8 @@ prune:
     divide_by_entropy: true
   params:
     batch_size: 2
-    dataset_sizes: [2, 5]
-    topk_features: [3, 6]
+    dataset_sizes: [2]
+    topk_features: [1]
 sft:
   cfg:
     tokenizer_id: *prune_model

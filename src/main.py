@@ -3,7 +3,7 @@ import json
 
 from src.analysis import aggregate_results, plot_experiment_results
 from src.eval import run_baseline_evals, run_eval
-from src.null_dists import generate_and_analyze_null_dists
+# from src.null_dists import generate_and_analyze_null_dists
 from src.prune import run_prune
 from src.schemas.suite import SuiteConfig
 from src.sft import run_sft
@@ -203,11 +203,12 @@ def main():
     global_summary_df = plot_experiment_results(original_df=all_results_df, suite=suite)
 
     if suite.run_null_analysis:
-        generate_and_analyze_null_dists(
-            suite=suite,
-            num_trials=suite.num_null_trials,
-            experiments_global_summary_df=global_summary_df,
-        )
+        raise NotImplementedError()
+        # generate_and_analyze_null_dists(
+        #     suite=suite,
+        #     num_trials=suite.num_null_trials,
+        #     experiments_global_summary_df=global_summary_df,
+        # )
 
     print("[DONE] All experiments and analysis complete.")
 

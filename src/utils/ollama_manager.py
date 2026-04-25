@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+import torch
 
 import requests
 
@@ -20,14 +21,15 @@ class OllamaManager:
 
         self.process = subprocess.Popen(
             ["ollama", "serve"],
-            env=env,  # This forces Ollama to use your custom port
-            stdout=subprocess.DEVNULL,
+            env=env,
+            # For debugging: Remove DEVNULL so you can see the GPU discovery logs
+            stdout=subprocess.DEVNULL, 
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid if os.name != "nt" else None,
+            preexec_fn=os.setsid,
         )
 
         # Wait for the server to wake up on the custom port
-        for i in range(10):
+        for i in range(15):
             try:
                 response = requests.get(f"http://{self.host}/api/tags")
                 if response.status_code == 200:
@@ -68,7 +70,6 @@ class OllamaManager:
 
                 # 4. Optional: Force a CUDA cache clear in Python
                 # Only relevant if your main script is also using the GPU
-                import torch
 
                 torch.cuda.empty_cache()
 

@@ -17,10 +17,18 @@ class SuiteDirs(BaseModel):
     prune_cfg: PruneConfig
     sft_cfg: SFTConfig
 
+    # --- INTERNAL HELPERS ---
+
     def _ensure_dir(self, path: Path) -> Path:
         """Creates the directory if it doesn't exist and returns the path."""
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    @staticmethod
+    def get_generation_cache_subdir(max_new_tokens: int) -> Path:
+        return Path("generation_cache") / f"mnt-{max_new_tokens}"
+
+    # --- COMPUTED FIELDS (No arguments, serialized in output) ---
 
     @computed_field
     @property
@@ -32,8 +40,7 @@ class SuiteDirs(BaseModel):
     def datasets(self) -> Path:
         return self._ensure_dir(self.output_dir / "datasets" / self.ids.prune)
 
-    @computed_field
-    @property
+    @property # Just a property, not a computed field since it's private
     def _results_root(self) -> Path:
         return self._ensure_dir(
             self.suite_root / "results" / self.ids.experiment / self.timestamp
@@ -71,17 +78,31 @@ class SuiteDirs(BaseModel):
     def reference_model_eval(self) -> Path:
         return self._ensure_dir(self.reference_model_root / self.ids.eval)
 
-    def get_ref_model_root_by_seed(self, seed: int):
+    # --- STANDARD METHODS (Take arguments, NOT properties) ---
+
+    def get_base_model_gen_cache(self, max_new_tokens: int) -> Path:
+        return self._ensure_dir(
+            self.base_model_root
+            / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
+        )
+
+    def get_ref_model_root_by_seed(self, seed: int) -> Path:
         return self._ensure_dir(self.reference_model_root / f"seed_{seed}")
 
-    def get_ref_model_eval_by_seed(self, seed: int):
+    def get_ref_model_eval_by_seed(self, seed: int) -> Path:
         return self._ensure_dir(self.get_ref_model_root_by_seed(seed) / self.ids.eval)
+    
+    def get_ref_model_gen_cache_by_seed(self, seed: int, max_new_tokens: int) -> Path:
+        return self._ensure_dir(
+            self.get_ref_model_root_by_seed(seed)
+            / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
+        )
 
     def get_dataset_path(self, dataset_size: int, topk: int) -> Path:
         """
         Returns path to the dataset file/folder.
-        Note: We do NOT auto-create this specific path, as it is an artifact
-        that will be written by the pruning script.
+        Note: We create this specific path for use by 
+        the feature reports prior to the auto-creation by HF datasets lib.
         """
         name = Path(self.prune_cfg.dataset_id).name
         return self._ensure_dir(self.datasets / f"{name}_ds{dataset_size}_topk{topk}.hf")
@@ -100,4 +121,10 @@ class SuiteDirs(BaseModel):
             self.get_trained_model_root(dataset_size, topk)
             / self.ids.eval
             / f"top{topk}"
+        )
+    
+    def get_trained_model_gen_cache(self, dataset_size: int, topk: int, max_new_tokens: int) -> Path:
+        return self._ensure_dir(
+            self.get_trained_model_root(dataset_size, topk)
+            / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
         )

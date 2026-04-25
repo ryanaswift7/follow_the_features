@@ -31,11 +31,12 @@ def extract_score(text):
 
 class Evaluator:
     # def __init__(self, model, tokenizer, ollama_judge):
-    def __init__(self, ollama_judge):
+    def __init__(self, ollama_judge, num_ctx = 8192):
         # self.tokenizer = tokenizer
         # self.model = model
         # self.scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
         self.ollama_judge = ollama_judge
+        self.num_ctx = num_ctx
 
     # def compute_rouge_l(self, generated, reference):
     #     scores = self.scorer.score(reference, generated)
@@ -70,7 +71,11 @@ class Evaluator:
             "model": self.ollama_judge,
             "prompt": eval_prompt,
             "stream": False,
-            "options": {"temperature": 0},
+             "options": {
+                "num_ctx": self.num_ctx,
+                "num_gpu": 999,      # Standard "force all layers" flag
+                "temperature": 0,    # greedy judge decoding for reproducibility
+            },
         }
         response = requests.post(url, json=payload)
         response.raise_for_status()

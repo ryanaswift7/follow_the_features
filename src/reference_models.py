@@ -215,6 +215,8 @@ def generate_reference_models(suite: SuiteConfig):
             topk=None,
             save_results_and_config=True,
             ref_model_seed=trial_seed,
+            gen_cache_dir=suite.dirs.get_ref_model_gen_cache_by_seed(
+                seed=trial_seed, max_new_tokens=suite.eval.cfg.max_new_tokens),
         )
 
         all_trials_scores.append(current_scores["lm_eval_results"])

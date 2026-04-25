@@ -26,13 +26,22 @@ def llama2_comps(suite: SuiteConfig):
         "meta-llama/Llama-2-13b-chat-hf",
         # "allenai/tulu-2-13b",
     ]
-    FILENAME = "llama2_comps_chat"
+    RESULTS_FILENAME = "llama2_comps_chat"
 
+    sota_dir = suite.dirs._ensure_dir(suite.dirs.results / "sota")
 
     for model_name in LLAMA2_SOTA_MODELS:
         model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", dtype=torch.bfloat16)
         tokenizer = AutoTokenizer.from_pretrained(TOKENIZER, fix_mistral_regex=True)
         model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+
+        sota_gen_cache_dir = suite.dirs._ensure_dir(
+            sota_dir
+            / model_name
+            / suite.dirs.get_generation_cache_subdir(
+                max_new_tokens=suite.eval.cfg.max_new_tokens)
+        )
+
         sota_results, _ = eval_and_save(
             model=model,
             tokenizer=tokenizer,
@@ -41,16 +50,17 @@ def llama2_comps(suite: SuiteConfig):
             dataset_size=None,
             topk=None,
             save_results_and_config=False,
+            gen_cache_dir=sota_gen_cache_dir,
         )
         sota_results.update({"model_name": Path(model_name).name})
         rows.append(json.dumps(sota_results))
 
     sota_df = pd.DataFrame(rows)
     print(sota_df)
-    sota_dir = suite.dirs._ensure_dir(suite.dirs.results / "sota")
-    sota_df.to_csv(sota_dir / f"{FILENAME}.csv")
-    sota_df.to_markdown(sota_dir / f"{FILENAME}.md")
-    sota_df.to_parquet(sota_dir / f"{FILENAME}.parquet")
+
+    sota_df.to_csv(sota_dir / f"{RESULTS_FILENAME}.csv")
+    sota_df.to_markdown(sota_dir / f"{RESULTS_FILENAME}.md")
+    sota_df.to_parquet(sota_dir / f"{RESULTS_FILENAME}.parquet")
     print(sota_df)
 
 """

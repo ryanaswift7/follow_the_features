@@ -83,18 +83,31 @@ def write_eval_results_and_config(
     return cfg
 
 
-def run_phase1_lm_eval(model, tokenizer, suite) -> Tuple[Dict, Dict]:
-    """Phase 1: LM Eval Evaluation"""
+def run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir: Path) -> Tuple[Dict, Dict]:
+    """Phase 1: LM Eval Evaluation with full caching"""
     print("\n" + "="*60)
     print("PHASE 1: Starting LM Eval Evaluation...")
     print("="*60)
     
-    lm_eval_results = {}
-    raw_lm_eval_scores = {}
-    
     if suite.eval.cfg.tasks is None:
         print("No LM Eval tasks specified in suite. Skipping Phase 1.")
         return {}, {}
+
+    # Ensure the cache directory exists and define the cache path
+    gen_cache_dir = Path(gen_cache_dir)
+    gen_cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = gen_cache_dir / "phase1_lm_eval.json"
+
+    # --- CACHE CHECK ---
+    if cache_path.exists():
+        print(f"Found cached Phase 1 results at {cache_path}. Skipping evaluation.")
+        with open(cache_path, "r") as f:
+            cache_data = json.load(f)
+        return cache_data["filtered"], cache_data["raw"]
+
+    # --- EVALUATION ---
+    lm_eval_results = {}
+    raw_lm_eval_scores = {}
 
     print("Preparing model for LM Eval: Saving device map and moving to cuda:0...")
     original_map = model.hf_device_map
@@ -182,71 +195,189 @@ def run_phase1_lm_eval(model, tokenizer, suite) -> Tuple[Dict, Dict]:
         filtered_lm_eval_results["average_lm_eval_score"] = avg_score
         print(f"  > Filtered Average Score : {avg_score:.4f}")
         
+    # --- SAVE CACHE ---
+    print("Saving Phase 1 results to cache...")
+    cache_data = {
+        "filtered": filtered_lm_eval_results,
+        "raw": raw_results["results"]
+    }
+    with open(cache_path, "w") as f:
+        json.dump(cache_data, f, indent=4)
+        
     print("Phase 1 LM Eval complete.")
     return filtered_lm_eval_results, raw_results["results"]
 
 
-def run_phase2_generate_candidates(model, tokenizer, suite, datasets_map, batch_size) -> Dict:
-    """Phase 2: Generate Candidate Responses"""
+def run_phase2_generate_candidates(model, tokenizer, suite, datasets_map, batch_size, candidate_gen_cache_dir: Path) -> Dict:
+    """Phase 2: Generate Candidate Responses with chunked dataset-level caching"""
     print("\n" + "="*60)
     print("PHASE 2: Generating Candidate Responses...")
     print("="*60)
     
+    CHUNK_SIZE = 10
     candidate_data = {}
+    
+    # Ensure the cache directory exists
+    candidate_gen_cache_dir = Path(candidate_gen_cache_dir)
+    candidate_gen_cache_dir.mkdir(parents=True, exist_ok=True)
+    
     for ds_name, data in datasets_map.items():
-        print(f"Processing dataset '{ds_name}' ({len(data)} samples)...")
-        candidate_preds, metric_refs = generate_responses(
-            model,
-            tokenizer,
-            data,
-            batch_size=batch_size,
-            max_new_tokens=suite.eval.cfg.max_new_tokens,
-        )
+        cache_path = candidate_gen_cache_dir / f"{ds_name}.json"
+        total_samples = len(data)
+        
+        if cache_path.exists():
+            with open(cache_path, 'r') as f:
+                cache = json.load(f)
+        else:
+            cache = {"preds": [], "refs": []}
+            
+        num_cached = len(cache["preds"])
+        
+        # Handle over-cached data
+        if num_cached > total_samples:
+            print(f"Cache for '{ds_name}' has {num_cached} samples. Truncating to requested {total_samples}.")
+            cache["preds"] = cache["preds"][:total_samples]
+            if cache.get("refs"):
+                cache["refs"] = cache["refs"][:total_samples]
+            num_cached = total_samples
+        
+        if num_cached < total_samples:
+            print(f"Processing '{ds_name}': Resuming from sample {num_cached}/{total_samples}...")
+            
+            for j in range(num_cached, total_samples, CHUNK_SIZE):
+                end_idx = min(j + CHUNK_SIZE, total_samples)
+                
+                # Use HF .select() to preserve Dataset object type
+                # chunk = data.select(range(j, end_idx))
+                chunk = data[j:end_idx]
+                
+                new_preds, new_refs = generate_responses(
+                    model,
+                    tokenizer,
+                    chunk,
+                    batch_size=batch_size,
+                    max_new_tokens=suite.eval.cfg.max_new_tokens,
+                )
+                
+                cache["preds"].extend(new_preds)
+                if new_refs is not None:
+                    cache["refs"].extend(new_refs)
+                    
+                with open(cache_path, 'w') as f:
+                    json.dump(cache, f)
+                    
+                print(f"  > Saved chunk: {end_idx}/{total_samples} generations cached.")
+                
+                torch.cuda.empty_cache()
+                gc.collect()
+        else:
+            print(f"Dataset '{ds_name}' fully cached ({num_cached}/{total_samples}). Skipping generation.")
+            
         candidate_data[ds_name] = {
-            "preds": candidate_preds, 
-            "refs": metric_refs, 
+            "preds": cache["preds"], 
+            "refs": cache["refs"], 
             "data": data
         }
-        print(f"Successfully generated candidates for '{ds_name}'. Cleaning up VRAM...")
-        torch.cuda.empty_cache()
-        gc.collect()
         
     print("Phase 2 complete. All candidate responses generated.")
     return candidate_data
 
 
 def run_phase3_generate_references(suite, tokenizer, datasets_map, batch_size) -> Dict:
-    """Phase 3: Generate Reference Responses (Inverted Loop to save RAM)"""
+    """Phase 3: Generate Reference Responses with VRAM optimization and chunked caching"""
     print("\n" + "="*60)
     print(f"PHASE 3: Generating Reference Responses ({suite.eval.cfg.num_ref_models} models)...")
     print("="*60)
     
+    CHUNK_SIZE = 10
     ref_outputs_by_dataset = {ds_name: [] for ds_name in datasets_map.keys()}
 
     for i in range(suite.eval.cfg.num_ref_models):
+        ref_path = suite.dirs.get_ref_model_root_by_seed(suite.seed + i)
+        ref_gen_cache_dir = Path(suite.dirs.get_ref_model_gen_cache_by_seed(
+            seed=suite.seed + i, max_new_tokens=suite.eval.cfg.max_new_tokens
+        ))
+        
+        # Ensure the cache directory exists for this specific reference model
+        ref_gen_cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # --- PRE-CHECK: Are ALL datasets fully cached for this model? ---
+        all_fully_cached = True
+        for ds_name, data in datasets_map.items():
+            cache_path = ref_gen_cache_dir / f"{ds_name}.json"
+            if not cache_path.exists():
+                all_fully_cached = False
+                break
+            with open(cache_path, 'r') as f:
+                if len(json.load(f)["preds"]) < len(data):
+                    all_fully_cached = False
+                    break
+        
+        if all_fully_cached:
+            print(f"\n[{i+1}/{suite.eval.cfg.num_ref_models}] All datasets fully cached for {ref_path}. SKIPPING VRAM LOAD.")
+            for ds_name, data in datasets_map.items():
+                cache_path = ref_gen_cache_dir / f"{ds_name}.json"
+                with open(cache_path, 'r') as f:
+                    preds = json.load(f)["preds"]
+                    # Slice to exact dataset length in case of over-caching
+                    ref_outputs_by_dataset[ds_name].append(preds[:len(data)])
+            continue
+
+        # If we reach here, we have pending generations and need the model in VRAM
         torch.cuda.empty_cache()
         gc.collect()
-        
-        ref_path = suite.dirs.get_ref_model_root_by_seed(suite.seed + i)
         print(f"\n[{i+1}/{suite.eval.cfg.num_ref_models}] Loading reference model weights into VRAM from: {ref_path}")
 
         ref_model = AutoModelForCausalLM.from_pretrained(
             ref_path, device_map="auto", torch_dtype=torch.bfloat16
         )
-        # ref_tokenizer = AutoTokenizer.from_pretrained(ref_path, fix_mistral_regex=True)
 
         for ds_name, data in datasets_map.items():
-            print(f"  > Generating baselines for dataset '{ds_name}'...")
-            ref_preds, _ = generate_responses(
-                ref_model,
-                tokenizer,
-                data,
-                batch_size=batch_size,
-                max_new_tokens=suite.eval.cfg.max_new_tokens,
-            )
-            ref_outputs_by_dataset[ds_name].append(ref_preds)
-            torch.cuda.empty_cache()
-            gc.collect()
+            cache_path = ref_gen_cache_dir / f"{ds_name}.json"
+            total_samples = len(data)
+            
+            if cache_path.exists():
+                with open(cache_path, 'r') as f:
+                    cache = json.load(f)
+            else:
+                cache = {"preds": []}
+                
+            num_cached = len(cache["preds"])
+            
+            if num_cached > total_samples:
+                print(f"  > Cache has {num_cached} samples. Truncating to requested {total_samples}.")
+                cache["preds"] = cache["preds"][:total_samples]
+                num_cached = total_samples
+            
+            if num_cached < total_samples:
+                print(f"  > Generating baselines for '{ds_name}': Resuming from sample {num_cached}/{total_samples}...")
+                for j in range(num_cached, total_samples, CHUNK_SIZE):
+                    end_idx = min(j + CHUNK_SIZE, total_samples)
+                    
+                    # Use HF .select() to preserve Dataset object type
+                    # chunk = data.select(range(j, end_idx))
+                    chunk = data[j:end_idx]
+                    
+                    new_preds, _ = generate_responses(
+                        ref_model,
+                        tokenizer,
+                        chunk,
+                        batch_size=batch_size,
+                        max_new_tokens=suite.eval.cfg.max_new_tokens,
+                    )
+                    
+                    cache["preds"].extend(new_preds)
+                    with open(cache_path, 'w') as f:
+                        json.dump(cache, f)
+                        
+                    print(f"    > Saved chunk: {end_idx}/{total_samples} generations cached.")
+                    
+                    torch.cuda.empty_cache()
+                    gc.collect()
+            else:
+                 print(f"  > Dataset '{ds_name}' fully cached.")
+            
+            ref_outputs_by_dataset[ds_name].append(cache["preds"])
 
         print(f"[{i+1}/{suite.eval.cfg.num_ref_models}] Complete. Deleting reference model from VRAM to make room...")
         remove_hook_from_module(ref_model, recurse=True)
@@ -375,6 +506,7 @@ def eval_and_save(
     tokenizer,
     suite,
     model_type,
+    gen_cache_dir: Path,
     dataset_size: Optional[int] = None,
     topk: Optional[int] = None,
     save_results_and_config: bool = True,
@@ -397,7 +529,7 @@ def eval_and_save(
     # =====================================================================
     # PHASE 1: LM Eval Evaluation
     # =====================================================================
-    filtered_lm_eval_results, raw_lm_eval_scores = run_phase1_lm_eval(model, tokenizer, suite)
+    filtered_lm_eval_results, raw_lm_eval_scores = run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir)
     eval_scores["lm_eval_results"] = filtered_lm_eval_results
 
 
@@ -413,7 +545,7 @@ def eval_and_save(
         
         # PHASE 2
         candidate_data = run_phase2_generate_candidates(
-            model, tokenizer, suite, datasets_map, batch_size
+            model, tokenizer, suite, datasets_map, batch_size, candidate_gen_cache_dir=gen_cache_dir,
         )
 
         # Explicitly clean up candidate model/tokenizer to free VRAM for references
@@ -561,14 +693,18 @@ def generate_responses(model, tokenizer, dataset, batch_size, max_new_tokens):
     model.eval()
     predictions = []
 
-    # Simple batching
+    # CRITICAL: Generative models must use left-padding
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
     prompts = [x["prompt"] for x in dataset]
     refs = [x["reference"] for x in dataset]
 
     for i in tqdm(range(0, len(prompts), batch_size), desc="Generating"):
         batch_prompts = prompts[i : i + batch_size]
 
-        # Apply Chat Template (Simple user/assistant format)
+        # Apply Chat Template
         formatted_prompts = []
         for p in batch_prompts:
             msgs = [{"role": "user", "content": p}]
@@ -578,31 +714,38 @@ def generate_responses(model, tokenizer, dataset, batch_size, max_new_tokens):
                 )
             )
 
+        # Tokenize (removed max_new_tokens truncation bug)
         inputs = tokenizer(
             formatted_prompts,
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=max_new_tokens,  # model.config.max_position_embeddings, # // 4
+            max_length=max_new_tokens, # model.config.max_position_embeddings, # // 4
         ).to(model.device)
 
-        with torch.no_grad():
+
+        # Get the sequence length of the input prompts
+        input_length = inputs.input_ids.shape[1]
+
+        # Use inference_mode instead of no_grad for a slight speedup
+        with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                # do_sample=False,  # Greedy decoding for deterministic eval
                 pad_token_id=tokenizer.pad_token_id,
+                # do_sample=False, # Uncomment if strict greedy decoding is desired
             )
 
-        # Decode and strip the prompt
-        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        for j, text in enumerate(decoded):
-            # Heuristic to strip input prompt if it leaks into output
-            # (Gemma chat template usually handles this, but we ensure cleanliness)
-            response = text.split("model")[-1] if "model" in text else text
-            predictions.append(response.strip())
+        # SLICE the output tensor to isolate only the newly generated tokens
+        generated_tokens = outputs[:, input_length:]
+
+        # Decode only the generated response
+        decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+        predictions.extend([text.strip() for text in decoded])
+        
+        # Free up memory references, but don't force an expensive CUDA cache flush
         del inputs
         del outputs
-        torch.cuda.empty_cache()
+        del generated_tokens
 
     return predictions, refs
