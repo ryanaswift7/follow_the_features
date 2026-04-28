@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 
 from src.analysis import aggregate_results, plot_experiment_results
 from src.eval import run_baseline_evals, run_eval
@@ -172,6 +173,27 @@ def run_experiments(suite: SuiteConfig):
                 print(
                     f"[FOUND] Results exist for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name} and config hashes match."
                 )
+
+    # Create a dictionary of the relevant IDs
+    experiment_ids = {
+        "experiment_id": suite.ids.experiment,
+        "prune_id": suite.ids.prune,
+        "sft_id": suite.ids.sft,
+        "eval_id": suite.ids.eval
+    }
+    
+    # Print the dictionary
+    print(f"[INFO] Relevant Experiment IDs: {experiment_ids}")
+
+    # Save to JSON if a path is specified
+    # if id_save_path:
+    save_path = Path(suite.dirs.results) /"suite_ids.json"
+    # Ensure the parent directories exist
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(save_path, "w") as f:
+        json.dump(experiment_ids, f, indent=4)
+    print(f"[INFO] Saved experiment IDs to {save_path}")
+    # --------------------
     return
 
 
