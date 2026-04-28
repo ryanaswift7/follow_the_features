@@ -112,8 +112,7 @@ class SuiteDirs(BaseModel):
         return self._ensure_dir(
             self.models
             / "trained"
-            / self.ids.prune
-            / self.ids.sft
+            / f"{self.ids.prune}_{self.ids.sft}"  # self.ids.prune / self.ids.sft
             / f"ds{dataset_size}_topk{topk}_{name}"
         )
 
