@@ -195,7 +195,7 @@ def get_topk_features(
     total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
 
     for batch in tqdm(dataloader, total=total_batches, desc="Processing Batches", unit="batch"):
-        tokens = model.to_tokens(batch["text"], truncate=True).to(device)
+        tokens = batch["input_ids"].to(device)
 
         with torch.no_grad():
             _, cache = model.run_with_cache(
@@ -347,10 +347,10 @@ def get_top_sample_indices(
     for i, batch in enumerate(
         tqdm(dataloader, total=total_batches, desc="Scanning Dataset", unit="batch")
     ):
-        batch_len = len(batch["text"])
+        batch_len = len(batch["input_ids"])
         batch_indices = range(dataset_start_index, dataset_start_index + batch_len)
 
-        tokens = model.to_tokens(batch["text"], truncate=True).to(device)
+        tokens = batch["input_ids"].to(device)
 
         with torch.no_grad():
             _, cache = model.run_with_cache(
@@ -557,15 +557,31 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
 
     formatter_func = get_formatting_function(dataset_id)
 
-    dataset = dataset.map(
+    str_dataset = dataset.map(
         lambda examples: formatter_func(tokenizer, examples, is_inference=False),
         batched=True,
         batch_size=1000,  # batch_size,
         num_proc=12,
-
     )
+
+    tokenized_dataset = str_dataset.map(
+        lambda examples: tokenizer(
+            examples["text"],
+            padding="max_length",
+            truncation=True,
+            max_length=suite.sft.cfg.max_seq_length,
+            return_tensors=None  # .map will handle conversion
+        ),
+        batched=True,
+        batch_size=1000,
+        num_proc=12,
+        remove_columns=str_dataset.column_names 
+    )
+    tokenized_dataset.set_format(type="torch", columns=["input_ids"])
+
+
     feature_selection_dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size
+        tokenized_dataset, batch_size=batch_size, shuffle=False,
     )
     hook_name = sae.cfg.metadata.hook_name
     layer_idx = int(hook_name.split(".")[1])
@@ -589,7 +605,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
 
 
     sample_selection_dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size
+        tokenized_dataset, batch_size=batch_size, shuffle=False,
     )
 
     kept_indices = get_top_sample_indices(
@@ -606,7 +622,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     )
 
     assert kept_indices, "No samples were kept after pruning!"
-    pruned_dataset = dataset.select(kept_indices)
+    pruned_dataset = str_dataset.select(kept_indices)
     pruned_dataset.save_to_disk(
         suite.dirs.get_dataset_path(dataset_size=dataset_size, topk=topk)
     )

@@ -34,8 +34,8 @@ eval:
     max_new_tokens: 256
     ollama_judge: "gemma3:27b-it-qat"
     num_ref_models: 1
-    tasks: null
-      # - leaderboard
+    tasks:
+      - leaderboard
     task_limit: null
   params:
     batch_size: 2  # 32

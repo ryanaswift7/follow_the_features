@@ -20,17 +20,18 @@ def llama2_comps(suite: SuiteConfig):
     # LLAMA2_BASE_MODEL = "meta-llama/Llama-2-13b-hf"
     TOKENIZER = "meta-llama/Llama-2-13b-chat-hf"
     LLAMA2_SOTA_MODELS = [
-        # "WizardLMTeam/WizardLM-13B-V1.2",
-        # "lmsys/vicuna-13b-v1.5",
-        # "hkust-nlp/deita-llama2-13b-v1.0-sft",
+        "WizardLMTeam/WizardLM-13B-V1.2",
+        "lmsys/vicuna-13b-v1.5",
+        "hkust-nlp/deita-llama2-13b-v1.0-sft",
         "meta-llama/Llama-2-13b-chat-hf",
-        # "allenai/tulu-2-13b",
+        "allenai/tulu-2-13b",
     ]
-    RESULTS_FILENAME = "llama2_comps_chat"
+    RESULTS_FILENAME = "llama2_comps"
 
     sota_dir = suite.dirs._ensure_dir(suite.dirs.results / "sota")
 
     for model_name in LLAMA2_SOTA_MODELS:
+        # tokenizer = model_name if "detia" not in model_name else TOKENIZER
         model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", dtype=torch.bfloat16)
         tokenizer = AutoTokenizer.from_pretrained(TOKENIZER, fix_mistral_regex=True)
         model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)

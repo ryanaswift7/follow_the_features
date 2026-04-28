@@ -183,7 +183,8 @@ def parse_args():
         "--config",
         "-c",
         type=str,
-        default="configs/base.yaml",
+        # default="configs/base.yaml",
+        required=True,
         help="Path to the experiment configuration YAML file (default: 'configs/base.yaml').",
     )
     return parser.parse_args()
