@@ -13,6 +13,46 @@ from src.utils.ensure_pad_token import ensure_pad_token
 # from src.utils.sota.grape import GrapePipeline
 # from src.utils.sota.s2l import S2LConsensusEngine
 
+def olmo3_comp(suite: SuiteConfig):
+    rows = []
+    filename = "olmo3_comp"
+    sota_dir = suite.dirs._ensure_dir(suite.dirs.results / "sota")
+    OLMO3_COMP = "allenai/Olmo-3-7B-Instruct-SFT"
+
+    # for model_name in LLAMA2_SOTA_MODELS:
+    # tokenizer = model_name if "detia" not in model_name else TOKENIZER
+    model = AutoModelForCausalLM.from_pretrained(OLMO3_COMP, device_map="auto", dtype=torch.bfloat16)
+    tokenizer = AutoTokenizer.from_pretrained(OLMO3_COMP, fix_mistral_regex=True)
+    model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+
+    sota_gen_cache_dir = suite.dirs._ensure_dir(
+        sota_dir
+        / OLMO3_COMP
+        / suite.dirs.get_generation_cache_subdir(
+            max_new_tokens=suite.eval.cfg.max_new_tokens)
+    )
+
+    sota_results, _ = eval_and_save(
+        model=model,
+        tokenizer=tokenizer,
+        suite=suite,
+        model_type=ModelType.SOTA,
+        dataset_size=None,
+        topk=None,
+        save_results_and_config=False,
+        gen_cache_dir=sota_gen_cache_dir,
+    )
+    sota_results.update({"model_name": Path(OLMO3_COMP).name})
+    rows.append(json.dumps(sota_results))
+
+    # sota_df = pd.DataFrame(rows)
+    sota_df = pd.json_normalize(rows)
+    print(sota_df)
+
+    sota_df.to_csv(sota_dir / f"{filename}.csv")
+    sota_df.to_markdown(sota_dir / f"{filename}.md")
+    sota_df.to_parquet(sota_dir / f"{filename}.parquet")
+    print(sota_df)
 
 
 def llama2_comps(suite: SuiteConfig):
@@ -56,7 +96,8 @@ def llama2_comps(suite: SuiteConfig):
         sota_results.update({"model_name": Path(model_name).name})
         rows.append(json.dumps(sota_results))
 
-    sota_df = pd.DataFrame(rows)
+    # sota_df = pd.DataFrame(rows)
+    sota_df = pd.json_normalize(rows)
     print(sota_df)
 
     sota_df.to_csv(sota_dir / f"{RESULTS_FILENAME}.csv")
@@ -137,7 +178,8 @@ def main():
     args = parse_args()
     suite = SuiteConfig.from_yaml(args.config)
     
-    llama2_comps(suite=suite)
+    # llama2_comps(suite=suite)
+    olmo3_comp(suite=suite)
     # modern_comps(suite=suite)
 
 if __name__ == "__main__":

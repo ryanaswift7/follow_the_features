@@ -1,7 +1,7 @@
  # supposed to be "agg_max_mean" but I forgot
  # to change the title and now the exps are saved
  # under "agg_mean_mean"
-title: "agg_mean_mean"
+title: "agg_max_mean"
 output_dir: "experiments"
 seed: 3
 run_null_analysis: false
