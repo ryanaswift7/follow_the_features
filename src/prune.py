@@ -66,11 +66,11 @@ def get_topk_features(
     sae_id: str,
     max_entropy_samples: int = 1024,
     device="cuda",
-    refine_top_n: int = 2000,
+    refine_top_n: int = 10_000,
 ):
 
     # ==========================================
-    # PATH SETUP (RESTORED)
+    # PATH SETUP
     # ==========================================
     csv_report_path = full_report_path_csv.with_suffix(".csv")
     json_topk_path = topk_report_path_json.with_suffix(".json")
@@ -81,27 +81,23 @@ def get_topk_features(
     t0_total = time.time()
 
     d_sae = sae.cfg.d_sae
-    log("Starting feature extraction")
+    log(f"Starting feature extraction")
     log(f"d_sae={d_sae:,} | refine_top_n={refine_top_n:,} | max_entropy_samples={max_entropy_samples}")
 
     # ==========================================
-    # PHASE 1: FORWARD PASS + STATS + SAMPLING
+    # PASS 1: STATS ONLY (GPU FAST)
     # ==========================================
     t0 = time.time()
+    log("Phase 1: Forward pass (stats only)")
 
     feature_sum = torch.zeros(d_sae, device=device)
     feature_sq_sum = torch.zeros(d_sae, device=device)
     feature_counts = torch.zeros(d_sae, device=device)
 
-    all_feats_buffer = []
-    all_vals_buffer = []
-
     total_tokens = 0
     total_nonzero = 0
 
-    log("Phase 1: Forward pass + stats + sampling")
-
-    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Forward")):
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Forward Pass 1")):
         tokens = batch["input_ids"].to(device)
 
         with torch.no_grad():
@@ -130,22 +126,17 @@ def get_topk_features(
             feature_sq_sum += (nz ** 2).sum(dim=0)
             feature_counts += mask.sum(dim=0)
 
-            nz_idx = mask.nonzero(as_tuple=True)
-            if len(nz_idx[0]) > 0:
-                all_feats_buffer.append(nz_idx[1].cpu())
-                all_vals_buffer.append(feats[nz_idx].cpu())
-
-        # if (batch_idx + 1) % 10 == 0:
-        #     sparsity = total_nonzero / max(total_tokens * d_sae, 1)
-        #     log(f"Batch {batch_idx+1}: tokens={total_tokens:,}, nnz={total_nonzero:,}, sparsity≈{sparsity:.2e}")
+        if (batch_idx + 1) % 10 == 0:
+            sparsity = total_nonzero / max(total_tokens * d_sae, 1)
+            log(f"Batch {batch_idx+1}: tokens={total_tokens:,}, nnz={total_nonzero:,}, sparsity≈{sparsity:.2e}")
 
     log(f"Phase 1 complete in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # PHASE 2: COARSE IMPORTANCE
+    # COARSE IMPORTANCE (GPU)
     # ==========================================
     t0 = time.time()
-    log("Computing coarse importance (Gaussian entropy)...")
+    log("Computing coarse importance")
 
     safe_counts = feature_counts.clamp(min=1)
     mean = feature_sum / safe_counts
@@ -163,67 +154,72 @@ def get_topk_features(
     log(f"Coarse importance computed in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # PHASE 3: SELECT TOP-N
+    # SELECT TOP-N
     # ==========================================
     t0 = time.time()
-    log(f"Selecting top {refine_top_n:,} features for refinement")
+    log(f"Selecting top {refine_top_n:,}")
 
     _, top_idx = torch.topk(coarse_importance, refine_top_n)
     top_idx_np = top_idx.cpu().numpy()
 
-    idx_map = -np.ones(d_sae, dtype=np.int32)
-    idx_map[top_idx_np] = np.arange(refine_top_n)
+    idx_map = {f: i for i, f in enumerate(top_idx_np)}
 
     log(f"Top-N selection done in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # PHASE 4: SAMPLE BUFFER BUILD
+    # PASS 2: SAMPLE ONLY TOP FEATURES (SAFE)
     # ==========================================
     t0 = time.time()
-    log("Building sample buffers...")
+    log("Phase 2: Sampling top features (second pass)")
 
     sample_buffer = np.zeros((refine_top_n, max_entropy_samples), dtype=np.float32)
     sample_counts = np.zeros(refine_top_n, dtype=np.int32)
 
-    for chunk_idx, (feats_cpu, vals_cpu) in enumerate(zip(all_feats_buffer, all_vals_buffer)):
-        feats_np = feats_cpu.numpy()
-        vals_np = vals_cpu.numpy()
+    top_idx_set = set(top_idx_np.tolist())
 
-        mapped = idx_map[feats_np]
-        valid = mapped >= 0
+    for batch in tqdm(dataloader, desc="Forward Pass 2 (Sampling)"):
+        tokens = batch["input_ids"].to(device)
 
-        if not np.any(valid):
-            continue
+        with torch.no_grad():
+            _, cache = model.run_with_cache(
+                tokens,
+                names_filter=[hook_name],
+                stop_at_layer=layer_idx + 1,
+            )
 
-        mapped = mapped[valid]
-        vals_np = vals_np[valid]
+            acts = cache[hook_name]
+            flat = acts.view(-1, acts.shape[-1])
 
-        order = np.argsort(mapped)
-        mapped = mapped[order]
-        vals_np = vals_np[order]
+            scaled = flat * torch.rsqrt(
+                flat.pow(2).mean(dim=-1, keepdim=True) + 1e-8
+            )
+            feats = sae.encode(scaled)
 
-        unique, start_idx, counts = np.unique(mapped, return_index=True, return_counts=True)
-
-        for u, start, cnt in zip(unique, start_idx, counts):
-            c = sample_counts[u]
-            if c >= max_entropy_samples:
+            nz_idx = (feats > 0).nonzero(as_tuple=True)
+            if len(nz_idx[0]) == 0:
                 continue
 
-            take = min(cnt, max_entropy_samples - c)
-            sample_buffer[u, c:c+take] = vals_np[start:start+take]
-            sample_counts[u] += take
+            vals = feats[nz_idx].cpu().numpy()
+            feat_ids = nz_idx[1].cpu().numpy()
 
-        if (chunk_idx + 1) % 20 == 0:
-            filled = np.mean(sample_counts > 0)
-            log(f"Buffer progress: chunk {chunk_idx+1}, filled_features={filled:.2%}")
+            for f, v in zip(feat_ids, vals):
+                if f not in top_idx_set:
+                    continue
 
-    log(f"Sample buffer built in {time.time() - t0:.2f}s")
+                i = idx_map[f]
+                c = sample_counts[i]
+
+                if c < max_entropy_samples:
+                    sample_buffer[i, c] = v
+                    sample_counts[i] += 1
+
+    log(f"Sampling complete in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # PHASE 5: VASICEK REFINEMENT
+    # VASICEK REFINEMENT
     # ==========================================
     t0 = time.time()
-    log("Computing Vasicek entropy for top features...")
+    log("Computing Vasicek entropy")
 
     importance = coarse_importance.cpu().numpy()
     decoder_norms_np = decoder_norms.cpu().numpy()
@@ -248,10 +244,10 @@ def get_topk_features(
     log(f"Vasicek done in {time.time() - t0:.2f}s | computed={valid_entropy:,}")
 
     # ==========================================
-    # PHASE 6: FINAL SORT
+    # FINAL SORT
     # ==========================================
     t0 = time.time()
-    log("Final full sort...")
+    log("Final full sort")
 
     sorted_feature_indices = np.argsort(-importance)
     sorted_importance_raw = importance[sorted_feature_indices]
@@ -259,9 +255,9 @@ def get_topk_features(
     log(f"Sort done in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # PHASE 7: WRITE REPORTS (UNCHANGED PIPELINE)
+    # WRITE REPORTS (UNCHANGED PIPELINE)
     # ==========================================
-    log(f"Writing full CSV report to {csv_report_path}")
+    log(f"Writing CSV → {csv_report_path}")
 
     full_report_data = write_full_feature_report_csv(
         feat_indices=sorted_feature_indices,
@@ -274,7 +270,7 @@ def get_topk_features(
         report_path=csv_report_path,
     )
 
-    log(f"Writing top-{k} JSON report to {json_topk_path}")
+    log(f"Writing JSON → {json_topk_path}")
 
     write_topk_feature_report_json(
         full_report_data=full_report_data,
@@ -284,9 +280,6 @@ def get_topk_features(
 
     log(f"TOTAL TIME: {time.time() - t0_total:.2f}s")
 
-    # ==========================================
-    # RETURN TOP-K
-    # ==========================================
     return (
         sorted_feature_indices[:k].tolist(),
         sorted_importance_raw[:k].tolist(),

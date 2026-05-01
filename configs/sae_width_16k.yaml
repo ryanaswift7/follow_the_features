@@ -22,7 +22,7 @@ sft:
   cfg:
     tokenizer_id: "google/gemma-3-270m-it"
     base_model_id: "google/gemma-3-1b-pt"
-    max_seq_length: 4750
+    max_seq_length: 2048
     learning_rate: 0.0002
     max_original_samples: *samples
   params:
