@@ -4,8 +4,11 @@ import os
 from pathlib import Path
 from typing import Literal, Optional, cast
 import csv
+import math
+import time
 
 import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import torch
 from datasets import load_dataset
 from sae_lens import SAE
@@ -20,84 +23,33 @@ from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
 from src.utils.feature_reports import write_full_feature_report_csv, write_topk_feature_report_json
 
 
-def estimate_vasicek_entropy(activations, window=None):
+def estimate_vasicek_entropy(vals: np.ndarray):
     """
     Estimates differential entropy using the Vasicek n-spacing method.
-    Includes jitter to prevent divide-by-zero errors from duplicate values.
+    Expects a 1D numpy array of already-filtered positive activations.
     """
-    # Filter for positive activations and convert to numpy
-    vals = activations[activations > 0].numpy()
-    
-    if len(vals) < 20:  # Minimum samples for a stable estimate
+    if len(vals) < 20:
         return 1e-5
         
-    # Add microscopic noise (jitter) to break exact ties
-    noise_scale = 1e-8
-    jitter = np.random.normal(0, noise_scale, size=vals.shape)
+    # Uniform noise is computationally cheaper than a normal distribution
+    jitter = np.random.uniform(-1e-8, 1e-8, size=vals.shape)
     vals_jittered = vals + jitter
     
     return differential_entropy(vals_jittered)
 
-
-def estimate_vasicek_entropy_vectorized(
-    activations: torch.Tensor, m: Optional[int] = None
-) -> float:
+def compute_single_importance_task(args):
     """
-    Estimates differential entropy using the Vasicek n-spacing method.
-    Robust implementation in pure PyTorch (avoids CPU/Numpy overhead).
-
-    Formula: H(X) = 1/n * sum( ln( n/2m * (x_{i+m} - x_{i-m}) ) )
+    Task worker for ProcessPoolExecutor.
     """
-    # 1. Robust Filtering & Casting
-    # Ensure float32 for log stability (activations often come in as bfloat16)
-    if activations.dtype == torch.bfloat16:
-        activations = activations.float()
+    i, mwf, act_slice_np, decoder_norm = args
+    h_clipped = 1.0
+    
+    if act_slice_np is not None:
+        h = float(estimate_vasicek_entropy(act_slice_np))
+        h_clipped = max(h, 0.01)
 
-    # Filter zeros to analyze the active distribution only
-    vals = activations[activations > 0]
+    return i, (mwf * decoder_norm) / h_clipped
 
-    n = vals.numel()
-    # Require a minimum number of samples for a statistically valid density estimate
-    if n < 20:
-        return 1e-5
-
-    # 2. Sort (Required for spacing methods)
-    # PyTorch sort is highly optimized and often faster than converting to numpy
-    vals, _ = torch.sort(vals)
-
-    # 3. Determine Window Size (m)
-    # Heuristic: sqrt(n) is the standard optimal choice for Vasicek
-    if m is None:
-        m = int(n**0.5)
-
-    # Clamp m to ensure valid spacing (must be < n/2 for the 2m logic)
-    m = min(max(1, m), n // 2)
-
-    # 4. Vectorized Gap Calculation using Padding
-    # We want x_{i+m} - x_{i-m} for all i.
-    # To vectorize, we pad the sorted array at both ends:
-    # Left pad: repeat x_0 (m times)
-    # Right pad: repeat x_{n-1} (m times)
-    pad_left = vals[0].expand(m)
-    pad_right = vals[-1].expand(m)
-
-    padded = torch.cat([pad_left, vals, pad_right])
-
-    # Calculate gaps: padded[i + 2m] - padded[i]
-    # This aligns the window perfectly for the entire tensor in one operation
-    gaps = padded[2 * m :] - padded[: -2 * m]
-
-    # 5. Compute Entropy
-    # Add epsilon to prevent log(0) if feature values are identical (e.g., clamped/discrete)
-    eps = 1e-6
-    gaps = torch.clamp(gaps, min=eps)
-
-    # H = mean( log( (n / 2m) * gaps ) )
-    #   = log(n/2m) + mean(log(gaps))
-    const_factor = n / (2 * m)
-    entropy = torch.log(gaps * const_factor).mean()
-
-    return entropy.item()
 
 def get_topk_features(
     dataloader,
@@ -112,197 +64,232 @@ def get_topk_features(
     llm_id: str,
     sae_release: str,
     sae_id: str,
-    max_entropy_samples: int = 50_000,
+    max_entropy_samples: int = 1024,
     device="cuda",
+    refine_top_n: int = 2000,
 ):
-    # Enforce extensions for clarity
-    csv_report_path = full_report_path_csv.with_suffix('.csv')
-    json_topk_path = topk_report_path_json.with_suffix('.json')
 
     # ==========================================
-    # 1. Check if the ranking already exists
+    # PATH SETUP (RESTORED)
     # ==========================================
-    if csv_report_path.exists():
-        print(f"[CACHE] Complete feature report found at {csv_report_path}. Extracting top {k} features...")
-        
-        top_feature_indices = []
-        top_importance_raw = []
-        full_report_dict_for_topk = {"cfg": {}, "features": {}}
-        
-        # Read the CSV to reconstruct the dict for the top-k subset
-        with open(csv_report_path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            count = 0
-            headers_found = False
-            
-            for row in reader:
-                if not row:
-                    continue
-                    
-                # Parse config comments
-                if row[0].startswith("#"):
-                    line = row[0][1:].strip()
-                    if ":" in line:
-                        key, val = line.split(":", 1)
-                        full_report_dict_for_topk["cfg"][key.strip()] = val.strip()
-                    continue
-                
-                # Skip the header row
-                if not headers_found:
-                    headers_found = True
-                    continue
-                
-                # Parse data rows (only need up to k)
-                if count < k:
-                    idx_str = row[0]
-                    raw_val = row[1]
-                    
-                    top_feature_indices.append(int(idx_str))
-                    top_importance_raw.append(float(raw_val))
-                    
-                    # Reconstruct the dict structure for the Top-K JSON writer
-                    full_report_dict_for_topk["features"][idx_str] = {
-                        "value": {
-                            "raw": raw_val,
-                            "norm_sum": row[2],
-                            "norm_max": row[3],
-                            "zscore": row[4],
-                        }
-                    }
-                    count += 1
-                else:
-                    break # We have our top k, stop reading the 65k CSV
+    csv_report_path = full_report_path_csv.with_suffix(".csv")
+    json_topk_path = topk_report_path_json.with_suffix(".json")
 
-        # Ensure the top-k report also exists if loaded from cache
-        if not json_topk_path.exists():
-            write_topk_feature_report_json(full_report_dict_for_topk, k, json_topk_path)
+    def log(msg):
+        print(f"[get_topk_features] {msg}", flush=True)
 
-        return top_feature_indices, top_importance_raw
+    t0_total = time.time()
 
-    # ==========================================
-    # 2. Compute rankings (if file not found)
-    # ==========================================
     d_sae = sae.cfg.d_sae
-    feature_sum = torch.zeros(d_sae, device="cpu", dtype=torch.float32)
+    log("Starting feature extraction")
+    log(f"d_sae={d_sae:,} | refine_top_n={refine_top_n:,} | max_entropy_samples={max_entropy_samples}")
 
-    if divide_by_entropy:
-        sample_buffer = torch.zeros((d_sae, max_entropy_samples), dtype=torch.bfloat16, device="cpu")
-        sample_counts = torch.zeros(d_sae, dtype=torch.long, device="cpu")
+    # ==========================================
+    # PHASE 1: FORWARD PASS + STATS + SAMPLING
+    # ==========================================
+    t0 = time.time()
 
-    total_samples_processed = 0
-    print(f"Computing feature importance for all {d_sae} features...")
+    feature_sum = torch.zeros(d_sae, device=device)
+    feature_sq_sum = torch.zeros(d_sae, device=device)
+    feature_counts = torch.zeros(d_sae, device=device)
 
-    total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
+    all_feats_buffer = []
+    all_vals_buffer = []
 
-    for batch in tqdm(dataloader, total=total_batches, desc="Processing Batches", unit="batch"):
+    total_tokens = 0
+    total_nonzero = 0
+
+    log("Phase 1: Forward pass + stats + sampling")
+
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Forward")):
         tokens = batch["input_ids"].to(device)
 
         with torch.no_grad():
             _, cache = model.run_with_cache(
-                tokens, names_filter=[hook_name], stop_at_layer=layer_idx + 1
+                tokens,
+                names_filter=[hook_name],
+                stop_at_layer=layer_idx + 1,
             )
+
             acts = cache[hook_name]
-            flat_acts = acts.reshape(-1, acts.shape[-1])
+            flat = acts.view(-1, acts.shape[-1])
+            total_tokens += flat.shape[0]
 
-            rms = torch.sqrt(torch.mean(flat_acts**2, dim=-1, keepdim=True) + 1e-8)
-            scaled_acts = flat_acts / rms
+            scaled = flat * torch.rsqrt(
+                flat.pow(2).mean(dim=-1, keepdim=True) + 1e-8
+            )
+            feats = sae.encode(scaled)
 
-            feature_acts = sae.encode(scaled_acts)
+            mask = feats > 0
+            nz = feats * mask
 
-            feature_sum += feature_acts.sum(dim=0).to(dtype=torch.float32, device="cpu")
-            total_samples_processed += flat_acts.shape[0]
+            nonzero_count = mask.sum().item()
+            total_nonzero += nonzero_count
 
-            if divide_by_entropy:
-                mask = feature_acts > 0
-                nonzero_indices = mask.nonzero(as_tuple=True)
-                token_idxs, feat_idxs = nonzero_indices
-                nonzero_vals = feature_acts[token_idxs, feat_idxs]
+            feature_sum += nz.sum(dim=0)
+            feature_sq_sum += (nz ** 2).sum(dim=0)
+            feature_counts += mask.sum(dim=0)
 
-                feat_idxs_cpu = feat_idxs.cpu()
-                nonzero_vals_cpu = nonzero_vals.to(dtype=torch.bfloat16, device="cpu")
+            nz_idx = mask.nonzero(as_tuple=True)
+            if len(nz_idx[0]) > 0:
+                all_feats_buffer.append(nz_idx[1].cpu())
+                all_vals_buffer.append(feats[nz_idx].cpu())
 
-                if feat_idxs_cpu.numel() > 0:
-                    sort_idx = torch.argsort(feat_idxs_cpu)
-                    sorted_feats = feat_idxs_cpu[sort_idx]
-                    sorted_vals = nonzero_vals_cpu[sort_idx]
+        # if (batch_idx + 1) % 10 == 0:
+        #     sparsity = total_nonzero / max(total_tokens * d_sae, 1)
+        #     log(f"Batch {batch_idx+1}: tokens={total_tokens:,}, nnz={total_nonzero:,}, sparsity≈{sparsity:.2e}")
 
-                    unique_feats, counts = torch.unique_consecutive(sorted_feats, return_counts=True)
-                    split_indices = torch.cumsum(counts, dim=0)
-                    split_indices = torch.cat([torch.tensor([0], device="cpu"), split_indices])
-
-                    for idx_in_unique, f_idx_tensor in enumerate(unique_feats):
-                        f_idx = f_idx_tensor.item()
-                        current_count = sample_counts[f_idx].item()
-
-                        if current_count < max_entropy_samples:
-                            start = split_indices[idx_in_unique].item()
-                            end = split_indices[idx_in_unique + 1].item()
-                            
-                            space_left = max_entropy_samples - current_count
-                            to_add = sorted_vals[start:end][:space_left]
-                            num_to_add = to_add.size(0)
-
-                            sample_buffer[f_idx, current_count : current_count + num_to_add] = to_add
-                            sample_counts[f_idx] += num_to_add
-        # break # Assuming this break is intentional for testing
-
-    print("\nCalculating Entropy and Importance Scores...")
-    decoder_norms = torch.norm(sae.W_dec, p=2, dim=-1).cpu()
-    final_importance = torch.zeros(d_sae)
-
-    def compute_single_importance(i):
-        mwf = feature_sum[i] / total_samples_processed
-        h_clipped = 1.0
-
-        if divide_by_entropy:
-            count = sample_counts[i].item()
-            if count > 0:
-                acts_tensor = sample_buffer[i, :count].to(torch.float32)
-                h = cast(float, estimate_vasicek_entropy(acts_tensor))
-            else:
-                h = 1.0
-            h_clipped = max(h, 0.01)
-
-        return i, (mwf * decoder_norms[i]) / h_clipped
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(compute_single_importance, i): i for i in range(d_sae)}
-        for future in tqdm(concurrent.futures.as_completed(futures), total=d_sae, desc="Calculating Entropy"):
-            i, importance_val = future.result()
-            final_importance[i] = importance_val
-            
-    # Sort ALL features descending
-    sorted_importance_raw, sorted_feature_indices = torch.sort(final_importance, descending=True)
+    log(f"Phase 1 complete in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # 3. Write out the Reports
+    # PHASE 2: COARSE IMPORTANCE
     # ==========================================
-    
-    # Report 1: The Complete Feature Ranking (as CSV)
+    t0 = time.time()
+    log("Computing coarse importance (Gaussian entropy)...")
+
+    safe_counts = feature_counts.clamp(min=1)
+    mean = feature_sum / safe_counts
+    var = (feature_sq_sum / safe_counts) - mean**2
+    var = var.clamp(min=1e-8)
+
+    decoder_norms = torch.norm(sae.W_dec, p=2, dim=-1)
+
+    if divide_by_entropy:
+        entropy = 0.5 * torch.log(2 * math.pi * math.e * var)
+        coarse_importance = (mean * decoder_norms) / entropy.clamp(min=1e-8)
+    else:
+        coarse_importance = mean * decoder_norms
+
+    log(f"Coarse importance computed in {time.time() - t0:.2f}s")
+
+    # ==========================================
+    # PHASE 3: SELECT TOP-N
+    # ==========================================
+    t0 = time.time()
+    log(f"Selecting top {refine_top_n:,} features for refinement")
+
+    _, top_idx = torch.topk(coarse_importance, refine_top_n)
+    top_idx_np = top_idx.cpu().numpy()
+
+    idx_map = -np.ones(d_sae, dtype=np.int32)
+    idx_map[top_idx_np] = np.arange(refine_top_n)
+
+    log(f"Top-N selection done in {time.time() - t0:.2f}s")
+
+    # ==========================================
+    # PHASE 4: SAMPLE BUFFER BUILD
+    # ==========================================
+    t0 = time.time()
+    log("Building sample buffers...")
+
+    sample_buffer = np.zeros((refine_top_n, max_entropy_samples), dtype=np.float32)
+    sample_counts = np.zeros(refine_top_n, dtype=np.int32)
+
+    for chunk_idx, (feats_cpu, vals_cpu) in enumerate(zip(all_feats_buffer, all_vals_buffer)):
+        feats_np = feats_cpu.numpy()
+        vals_np = vals_cpu.numpy()
+
+        mapped = idx_map[feats_np]
+        valid = mapped >= 0
+
+        if not np.any(valid):
+            continue
+
+        mapped = mapped[valid]
+        vals_np = vals_np[valid]
+
+        order = np.argsort(mapped)
+        mapped = mapped[order]
+        vals_np = vals_np[order]
+
+        unique, start_idx, counts = np.unique(mapped, return_index=True, return_counts=True)
+
+        for u, start, cnt in zip(unique, start_idx, counts):
+            c = sample_counts[u]
+            if c >= max_entropy_samples:
+                continue
+
+            take = min(cnt, max_entropy_samples - c)
+            sample_buffer[u, c:c+take] = vals_np[start:start+take]
+            sample_counts[u] += take
+
+        if (chunk_idx + 1) % 20 == 0:
+            filled = np.mean(sample_counts > 0)
+            log(f"Buffer progress: chunk {chunk_idx+1}, filled_features={filled:.2%}")
+
+    log(f"Sample buffer built in {time.time() - t0:.2f}s")
+
+    # ==========================================
+    # PHASE 5: VASICEK REFINEMENT
+    # ==========================================
+    t0 = time.time()
+    log("Computing Vasicek entropy for top features...")
+
+    importance = coarse_importance.cpu().numpy()
+    decoder_norms_np = decoder_norms.cpu().numpy()
+
+    valid_entropy = 0
+
+    for i in tqdm(range(refine_top_n), desc="Vasicek"):
+        count = sample_counts[i]
+
+        if divide_by_entropy and count > 20:
+            vals = sample_buffer[i, :count]
+            h = estimate_vasicek_entropy(vals)
+            h = max(h, 0.01)
+            valid_entropy += 1
+        else:
+            h = 1.0
+
+        f = top_idx_np[i]
+        mwf = (feature_sum[f] / max(feature_counts[f], 1)).item()
+        importance[f] = (mwf * decoder_norms_np[f]) / h
+
+    log(f"Vasicek done in {time.time() - t0:.2f}s | computed={valid_entropy:,}")
+
+    # ==========================================
+    # PHASE 6: FINAL SORT
+    # ==========================================
+    t0 = time.time()
+    log("Final full sort...")
+
+    sorted_feature_indices = np.argsort(-importance)
+    sorted_importance_raw = importance[sorted_feature_indices]
+
+    log(f"Sort done in {time.time() - t0:.2f}s")
+
+    # ==========================================
+    # PHASE 7: WRITE REPORTS (UNCHANGED PIPELINE)
+    # ==========================================
+    log(f"Writing full CSV report to {csv_report_path}")
+
     full_report_data = write_full_feature_report_csv(
         feat_indices=sorted_feature_indices,
         feat_values=sorted_importance_raw,
         total_features=d_sae,
         llm_id=llm_id,
-        sae_release=sae_release, 
+        sae_release=sae_release,
         sae_id=sae_id,
         hook_name=hook_name,
-        report_path=csv_report_path
+        report_path=csv_report_path,
     )
 
-    # Report 2: Extract Top-K into JSON
+    log(f"Writing top-{k} JSON report to {json_topk_path}")
+
     write_topk_feature_report_json(
-        full_report_data=full_report_data, 
-        k=k, 
-        topk_report_path=json_topk_path
+        full_report_data=full_report_data,
+        k=k,
+        topk_report_path=json_topk_path,
     )
+
+    log(f"TOTAL TIME: {time.time() - t0_total:.2f}s")
 
     # ==========================================
-    # 4. Return ONLY the requested top-k
+    # RETURN TOP-K
     # ==========================================
     return (
         sorted_feature_indices[:k].tolist(),
-        sorted_importance_raw[:k].tolist()
+        sorted_importance_raw[:k].tolist(),
     )
 
 def get_top_sample_indices(

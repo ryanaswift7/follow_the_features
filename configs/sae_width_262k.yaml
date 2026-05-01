@@ -1,4 +1,4 @@
-title: "sae_width_1m"
+title: "sae_width_262k"
 output_dir: "experiments"
 seed: 3
 run_null_analysis: false
@@ -8,7 +8,7 @@ prune:
   cfg:
     prune_model_id: &prune_model "google/gemma-3-270m"
     sae_release: "gemma-scope-2-270m-pt-res"
-    sae_id: "layer_9_width_1m_l0_medium"
+    sae_id: "layer_9_width_262k_l0_medium"
     dataset_id: "yahma/alpaca-cleaned"
     num_samples: &samples 51760
     seq_agg_method: "sum"  # possible values: "sum", "mean", "max"
