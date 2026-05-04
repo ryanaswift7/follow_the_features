@@ -21,6 +21,7 @@ import numpy as np
 from src.schemas.suite import SuiteConfig
 from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
 from src.utils.feature_reports import write_full_feature_report_csv, write_topk_feature_report_json
+from src.utils.ensure_pad_token import ensure_pad_token
 
 
 def estimate_vasicek_entropy(vals: np.ndarray):
@@ -64,9 +65,11 @@ def get_topk_features(
     llm_id: str,
     sae_release: str,
     sae_id: str,
-    max_entropy_samples: int = 1024,
+    max_entropy_samples: int = 2048,
     device="cuda",
-    refine_top_n: int = 10_000,
+    refine_top_n: int = 1_000,
+    chunk_size: int = 256,  # prevents the 1-million-dim expansion from blowing up VRAM
+
 ):
 
     # ==========================================
@@ -81,7 +84,7 @@ def get_topk_features(
     t0_total = time.time()
 
     d_sae = sae.cfg.d_sae
-    log(f"Starting feature extraction")
+    log("Starting feature extraction")
     log(f"d_sae={d_sae:,} | refine_top_n={refine_top_n:,} | max_entropy_samples={max_entropy_samples}")
 
     # ==========================================
@@ -96,6 +99,7 @@ def get_topk_features(
 
     total_tokens = 0
     total_nonzero = 0
+    
 
     for batch_idx, batch in enumerate(tqdm(dataloader, desc="Forward Pass 1")):
         tokens = batch["input_ids"].to(device)
@@ -108,27 +112,33 @@ def get_topk_features(
             )
 
             acts = cache[hook_name]
+
+            # 1. Gemma Scope Unit Norm Scaling
+            rms = torch.sqrt(torch.mean(acts**2, dim=-1, keepdim=True) + 1e-6)
+            scaled_acts = acts / rms
+            
             flat = acts.view(-1, acts.shape[-1])
             total_tokens += flat.shape[0]
 
-            scaled = flat * torch.rsqrt(
-                flat.pow(2).mean(dim=-1, keepdim=True) + 1e-8
-            )
-            feats = sae.encode(scaled)
+            for start_idx in range(0, flat.shape[0], chunk_size):
+                end_idx = min(start_idx + chunk_size, flat.shape[0])
+                acts_chunk = flat[start_idx:end_idx]
+                
+                # Let the SAE (and SAELens) handle the raw activations natively
+                feats = sae.encode(acts_chunk)
 
-            mask = feats > 0
-            nz = feats * mask
+                mask = feats > 0
+                nz = feats * mask
 
-            nonzero_count = mask.sum().item()
-            total_nonzero += nonzero_count
+                total_nonzero += mask.sum().item()
 
-            feature_sum += nz.sum(dim=0)
-            feature_sq_sum += (nz ** 2).sum(dim=0)
-            feature_counts += mask.sum(dim=0)
-
-        if (batch_idx + 1) % 10 == 0:
-            sparsity = total_nonzero / max(total_tokens * d_sae, 1)
-            log(f"Batch {batch_idx+1}: tokens={total_tokens:,}, nnz={total_nonzero:,}, sparsity≈{sparsity:.2e}")
+                feature_sum += nz.sum(dim=0)
+                feature_sq_sum += (nz ** 2).sum(dim=0)
+                feature_counts += mask.sum(dim=0)
+                
+                # Explicitly free chunk memory
+                del feats, mask, nz
+        # break
 
     log(f"Phase 1 complete in {time.time() - t0:.2f}s")
 
@@ -159,23 +169,27 @@ def get_topk_features(
     t0 = time.time()
     log(f"Selecting top {refine_top_n:,}")
 
+    # top_idx stays on the GPU for Phase 2 slicing
     _, top_idx = torch.topk(coarse_importance, refine_top_n)
+    
+    # We still need the numpy version for Phase 3 and final mapping
     top_idx_np = top_idx.cpu().numpy()
-
-    idx_map = {f: i for i, f in enumerate(top_idx_np)}
 
     log(f"Top-N selection done in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # PASS 2: SAMPLE ONLY TOP FEATURES (SAFE)
+    # PASS 2: SAMPLE ONLY TOP FEATURES (ZERO SYNC)
     # ==========================================
     t0 = time.time()
-    log("Phase 2: Sampling top features (second pass)")
+    log("Phase 2: Sampling top features (second pass - pure GPU)")
 
-    sample_buffer = np.zeros((refine_top_n, max_entropy_samples), dtype=np.float32)
-    sample_counts = np.zeros(refine_top_n, dtype=np.int32)
+    # Allocate buffers entirely on the GPU. 
+    # Flattened 1D buffer allows for direct advanced indexing assignment.
+    gpu_buffer = torch.zeros(refine_top_n * max_entropy_samples, device=device, dtype=torch.float32)
+    gpu_counts = torch.zeros(refine_top_n, dtype=torch.long, device=device)
 
-    top_idx_set = set(top_idx_np.tolist())
+    # Pre-compute row offsets to avoid recalculating inside the loop
+    row_offsets = (torch.arange(refine_top_n, device=device) * max_entropy_samples).unsqueeze(1)
 
     for batch in tqdm(dataloader, desc="Forward Pass 2 (Sampling)"):
         tokens = batch["input_ids"].to(device)
@@ -188,30 +202,65 @@ def get_topk_features(
             )
 
             acts = cache[hook_name]
-            flat = acts.view(-1, acts.shape[-1])
 
-            scaled = flat * torch.rsqrt(
-                flat.pow(2).mean(dim=-1, keepdim=True) + 1e-8
-            )
-            feats = sae.encode(scaled)
+            # 1. Gemma Scope Unit Norm Scaling
+            rms = torch.sqrt(torch.mean(acts**2, dim=-1, keepdim=True) + 1e-6)
+            scaled_acts = acts / rms
 
-            nz_idx = (feats > 0).nonzero(as_tuple=True)
-            if len(nz_idx[0]) == 0:
-                continue
+            flat = acts.view(-1, scaled_acts.shape[-1])
 
-            vals = feats[nz_idx].cpu().numpy()
-            feat_ids = nz_idx[1].cpu().numpy()
+            # Still omitting the manual scaling for Gemma Scope 2 compatibility
+            for start_idx in range(0, flat.shape[0], chunk_size):
+                end_idx = min(start_idx + chunk_size, flat.shape[0])
+                acts_chunk = flat[start_idx:end_idx]
+                chunk_dim = acts_chunk.shape[0]
+                
+                feats = sae.encode(acts_chunk)
 
-            for f, v in zip(feat_ids, vals):
-                if f not in top_idx_set:
+                # Slice to only the top_n features: shape drops to [chunk_size, refine_top_n]
+                top_feats = feats[:, top_idx]
+                
+                # Transpose to [refine_top_n, chunk_size] for row-wise processing
+                top_feats_t = top_feats.T
+                
+                # Count how many actual non-zeros fired per feature in this chunk
+                active_counts = (top_feats_t > 0).sum(dim=1)
+                
+                # Fast path skip if the chunk is completely dead for our top features
+                if active_counts.sum() == 0:
+                    del feats, top_feats, top_feats_t, active_counts
                     continue
 
-                i = idx_map[f]
-                c = sample_counts[i]
+                # Sorting descending packs all positive non-zeros to the front of each row
+                sorted_feats, _ = torch.sort(top_feats_t, dim=1, descending=True)
 
-                if c < max_entropy_samples:
-                    sample_buffer[i, c] = v
-                    sample_counts[i] += 1
+                # Create relative indices [1, chunk_dim] for the sorted items
+                j_idx = torch.arange(chunk_dim, device=device).unsqueeze(0)
+                
+                # Calculate what their target indices will be in the buffer based on current counts
+                target_idx = gpu_counts.unsqueeze(1) + j_idx
+                
+                # Boolean mask: Only take items that are actual non-zeros AND haven't hit the sample cap
+                valid_mask = (j_idx < active_counts.unsqueeze(1)) & (target_idx < max_entropy_samples)
+
+                if valid_mask.any():
+                    # Map to the global 1D coordinates in the flattened buffer
+                    global_target_idx = row_offsets + target_idx
+                    
+                    # Direct advanced indexing assignment (100% vectorized, pure GPU)
+                    gpu_buffer[global_target_idx[valid_mask]] = sorted_feats[valid_mask]
+                    
+                    # Update counts, hard-clamping at max_entropy_samples
+                    gpu_counts = torch.clamp(gpu_counts + active_counts, max=max_entropy_samples)
+
+                # Explicitly free memory
+                del feats, top_feats, top_feats_t, sorted_feats, active_counts, j_idx, target_idx, valid_mask
+        # break
+
+    # --- THE ONLY SYNC IN PHASE 2 ---
+    # Move the fully populated buffer to CPU and reshape to match what Phase 3 expects
+    sample_buffer = gpu_buffer.view(refine_top_n, max_entropy_samples).cpu().numpy()
+    sample_counts = gpu_counts.cpu().numpy()
 
     log(f"Sampling complete in {time.time() - t0:.2f}s")
 
@@ -221,8 +270,8 @@ def get_topk_features(
     t0 = time.time()
     log("Computing Vasicek entropy")
 
-    importance = coarse_importance.cpu().numpy()
-    decoder_norms_np = decoder_norms.cpu().numpy()
+    importance = coarse_importance.cpu().detach().numpy()
+    decoder_norms_np = decoder_norms.cpu().detach().numpy()
 
     valid_entropy = 0
 
@@ -231,7 +280,7 @@ def get_topk_features(
 
         if divide_by_entropy and count > 20:
             vals = sample_buffer[i, :count]
-            h = estimate_vasicek_entropy(vals)
+            h = estimate_vasicek_entropy(vals) # Ensure this relies on your optimized version
             h = max(h, 0.01)
             valid_entropy += 1
         else:
@@ -255,7 +304,7 @@ def get_topk_features(
     log(f"Sort done in {time.time() - t0:.2f}s")
 
     # ==========================================
-    # WRITE REPORTS (UNCHANGED PIPELINE)
+    # WRITE REPORTS
     # ==========================================
     log(f"Writing CSV → {csv_report_path}")
 
@@ -285,6 +334,12 @@ def get_topk_features(
         sorted_importance_raw[:k].tolist(),
     )
 
+
+import torch
+import heapq
+from tqdm import tqdm
+from typing import Literal
+
 def get_top_sample_indices(
     dataloader,
     model,
@@ -296,6 +351,7 @@ def get_top_sample_indices(
     sequence_aggregation: Literal["sum", "mean", "max"],
     feature_aggregation: Literal["sum", "mean"],
     device="cuda",
+    chunk_size: int = 256,  # <-- Added chunk size parameter
 ):
     """
     Ranks data samples using a Min-Heap for efficient streaming Top-N selection.
@@ -311,7 +367,6 @@ def get_top_sample_indices(
         feature_indices = feature_indices.to(device)
 
     # The Heap: Stores tuples of (score, dataset_index)
-    # Python's heapq is a min-heap. We will keep the 'top n' largest scores.
     top_heap = []
 
     print(
@@ -319,11 +374,8 @@ def get_top_sample_indices(
     )
 
     dataset_start_index = 0
-
-    # Determine total batches if possible for the progress bar
     total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
 
-    # Wrap dataloader in tqdm
     for i, batch in enumerate(
         tqdm(dataloader, total=total_batches, desc="Scanning Dataset", unit="batch")
     ):
@@ -342,13 +394,24 @@ def get_top_sample_indices(
             rms = torch.sqrt(torch.mean(acts**2, dim=-1, keepdim=True) + 1e-6)
             scaled_acts = acts / rms
 
-            # 2. Encode
+            # 2 & 3. Encode and Filter (Chunked to save VRAM)
             flat_acts = scaled_acts.view(-1, acts.shape[-1])
-            feature_acts = sae.encode(flat_acts)
-            feature_acts = feature_acts.view(acts.shape[0], acts.shape[1], -1)
-
-            # 3. Filter
-            relevant_acts = feature_acts[:, :, feature_indices]
+            chunked_relevant_acts = []
+            
+            for start_idx in range(0, flat_acts.shape[0], chunk_size):
+                chunk = flat_acts[start_idx : start_idx + chunk_size]
+                chunk_features = sae.encode(chunk)
+                
+                # Filter IMMEDIATELY. This drops the massive unused feature dimension 
+                # before we accumulate the chunks, saving huge amounts of VRAM.
+                filtered_chunk = chunk_features[:, feature_indices]
+                chunked_relevant_acts.append(filtered_chunk)
+            
+            # Concatenate the filtered chunks
+            relevant_acts_flat = torch.cat(chunked_relevant_acts, dim=0)
+            
+            # Reshape back to (batch, seq_len, len(feature_indices))
+            relevant_acts = relevant_acts_flat.view(acts.shape[0], acts.shape[1], -1)
 
             # 4. Sequence Aggregation
             if sequence_aggregation == "sum":
@@ -374,31 +437,26 @@ def get_top_sample_indices(
             # --- HEAP OPTIMIZATION ---
             for score, idx in zip(final_scores, batch_indices):
                 if len(top_heap) < n_samples:
-                    # If buffer isn't full, just push
                     heapq.heappush(top_heap, (score, idx))
                 else:
-                    # Buffer is full.
-                    # heappushpop pushes the new item, then pops the smallest item.
-                    # This maintains the "Top N" efficiently.
                     heapq.heappushpop(top_heap, (score, idx))
 
-        # Cleanup
+        # Cleanup (Updated to reflect removed intermediate variables)
         del (
             tokens,
             acts,
             scaled_acts,
-            feature_acts,
+            flat_acts,
+            chunked_relevant_acts,
+            relevant_acts_flat,
             relevant_acts,
             seq_scores,
-            final_scores,
         )
         torch.cuda.empty_cache()
 
         dataset_start_index += batch_len
 
     # --- Final Sort ---
-    # The heap is not sorted; it just guarantees heap[0] is the minimum.
-    # We sort descending by score to return the "Best" samples first.
     top_heap.sort(key=lambda x: x[0], reverse=True)
 
     return [idx for score, idx in top_heap]
@@ -520,9 +578,12 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
 
     print(f"--- Prune: dataset_size={dataset_size}, topk={topk} ---")
     tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     model = HookedTransformer.from_pretrained_no_processing(
         model_id, device=device, dtype=torch.bfloat16
     )
+    # model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+
     sae, _, _ = SAE.from_pretrained_with_cfg_and_sparsity(
         release=sae_release, sae_id=sae_id, device=device
     )

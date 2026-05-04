@@ -94,8 +94,10 @@ def generate_reference_models(suite: SuiteConfig):
         if suite.debug_mode:
             full_ds = full_ds.select(range(1))
 
-        full_ds_len = len(full_ds)
+        if suite.prune.cfg.num_samples is not None and suite.prune.cfg.num_samples < len(full_ds):
+            full_ds = full_ds.select(range(suite.prune.cfg.num_samples))
 
+        full_ds_len = len(full_ds)
 
 
         # 1. Standardize to "messages" format ONLY if it's Alpaca

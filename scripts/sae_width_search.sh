@@ -5,7 +5,7 @@
 
 configs=(
     "sae_width_16k.yaml"
-    "sae_width_262k.yaml"
+    "sae_width_1m.yaml"
 )
 
 for c in "${configs[@]}"; do

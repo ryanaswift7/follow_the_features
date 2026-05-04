@@ -124,14 +124,25 @@ def run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir: Path) -> Tuple[Di
     )
 
     print(f"Running simple_evaluate on tasks: {suite.eval.cfg.tasks}...")
+
+
+    # from transformers import GenerationConfig
+
+    # inspect what the model is actually carrying
+    hflm_model.model.generation_config.max_new_tokens = suite.eval.cfg.max_new_tokens
+    # print(hflm_model.model.generation_config)
+
+    # force a clean generation config
+    # hflm_model.model.generation_config = GenerationConfig(max_new_tokens=256)
+
     raw_results = lm_eval.simple_evaluate(
         model=hflm_model, 
         tasks=suite.eval.cfg.tasks,
         limit=suite.eval.cfg.task_limit,
         batch_size=suite.eval.params.batch_size,
-        gen_kwargs={
-            "max_gen_toks": suite.eval.cfg.max_new_tokens,
-        },
+        gen_kwargs={"max_gen_toks": suite.eval.cfg.max_new_tokens},
+        # if "olmo" not in suite.sft.cfg.base_model_id.lower() else 
+        #     {"max_new_tokens": suite.eval.cfg.max_new_tokens,},
         apply_chat_template=True,
     )
 
