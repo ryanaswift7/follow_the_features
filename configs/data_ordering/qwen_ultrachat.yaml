@@ -1,4 +1,4 @@
-title: "olmo_ultrachat"
+title: "qwen_ultrachat"
 output_dir: "experiments"
 seed: 3
 run_null_analysis: false

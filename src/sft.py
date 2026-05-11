@@ -58,7 +58,8 @@ def generate_sft_trainer_args(
 
     return SFTConfig(
         output_dir=output_dir,
-        dataset_text_field="text",
+        dataset_text_field="messages",  # "text",
+        assistant_only_loss=True,
         max_length=max_seq_length,
         num_train_epochs=1,
         per_device_train_batch_size=batch_size,

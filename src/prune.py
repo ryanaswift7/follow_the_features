@@ -462,7 +462,8 @@ def get_top_sample_indices(
     return [idx for score, idx in top_heap]
 
 
-def format_alpaca(tokenizer, examples, is_inference=False):
+def convert_alpaca_to_messages(examples, is_inference=False):
+    """Converts Alpaca instruction/input/output format into standard messages format."""
     # Safely get columns, defaulting to empty strings if missing
     length = len(examples.get("output", examples.get("instruction", [])))
     instructions = examples.get("instruction", [""] * length)
@@ -475,9 +476,11 @@ def format_alpaca(tokenizer, examples, is_inference=False):
         inst_stripped = inst.strip()
         inp_stripped = inp.strip()
         
-        # Prepend instruction before the user input
-        if inp_stripped:
+        # Combine instruction and input cleanly
+        if inst_stripped and inp_stripped:
             user_content = f"{inst_stripped}\n\n{inp_stripped}"
+        elif inp_stripped:
+            user_content = inp_stripped
         else:
             user_content = inst_stripped
             
@@ -489,59 +492,62 @@ def format_alpaca(tokenizer, examples, is_inference=False):
             
         batch_conversations.append(conversation)
         
-    # Apply template to the ENTIRE batch at once
-    formatted_texts = tokenizer.apply_chat_template(
-        batch_conversations, 
-        tokenize=False, 
-        add_generation_prompt=is_inference
-    )
-        
-    return {"text": formatted_texts}
+    return {"messages": batch_conversations}
+
+
+def format_alpaca(tokenizer, examples, is_inference=False):
+    """Wraps the conversion and formatting processes."""
+    # 1. Convert to standard messages format
+    standardized_examples = convert_alpaca_to_messages(examples, is_inference)
+    
+    # 2. Pass the converted messages to the existing formatter
+    return format_standard_messages(tokenizer, standardized_examples, is_inference)
 
 
 def format_standard_messages(tokenizer, examples, is_inference=False):
-    has_prompt = "prompt" in examples
-    has_instruction = "instruction" in examples
+    return {'messages': examples['messages']}
+    # has_prompt = "prompt" in examples
+    # has_instruction = "instruction" in examples
     
-    batch_conversations = []
+    # batch_conversations = []
     
-    for i, messages in enumerate(examples["messages"]):
-        # Create a shallow copy of the message list
-        prompt_messages = list(messages)
+    # for i, messages in enumerate(examples["messages"]):
+    #     # Create a shallow copy of the message list
+    #     prompt_messages = list(messages)
         
-        # Gather anything that needs to be prepended
-        prepends = []
-        if has_instruction and examples["instruction"][i]:
-            prepends.append(examples["instruction"][i].strip())
-        if has_prompt and examples["prompt"][i]:
-            prepends.append(examples["prompt"][i].strip())
+    #     # Gather anything that needs to be prepended
+    #     prepends = []
+    #     if has_instruction and examples["instruction"][i]:
+    #         prepends.append(examples["instruction"][i].strip())
+    #     if has_prompt and examples["prompt"][i]:
+    #         prepends.append(examples["prompt"][i].strip())
             
-        # Prepend to the first user message
-        if prepends and prompt_messages and prompt_messages[0]["role"] == "user":
-            combined_prepend = "\n\n".join(prepends)
-            current_content = prompt_messages[0]["content"]
+    #     # Prepend to the first user message
+    #     if prepends and prompt_messages and prompt_messages[0]["role"] == "user":
+    #         combined_prepend = "\n\n".join(prepends)
+    #         current_content = prompt_messages[0]["content"]
             
-            # Safeguard: Don't prepend if the text is already identical
-            if combined_prepend not in current_content:
-                # Create a new dict for the modified message to avoid mutating original
-                first_msg = prompt_messages[0].copy()
-                first_msg["content"] = f"{combined_prepend}\n\n{current_content}"
-                prompt_messages[0] = first_msg
+    #         # Safeguard: Don't prepend if the text is already identical
+    #         if combined_prepend not in current_content:
+    #             # Create a new dict for the modified message to avoid mutating original
+    #             first_msg = prompt_messages[0].copy()
+    #             first_msg["content"] = f"{combined_prepend}\n\n{current_content}"
+    #             prompt_messages[0] = first_msg
         
-        # Strip final assistant turn if doing inference
-        if is_inference and prompt_messages and prompt_messages[-1]["role"] == "assistant":
-            prompt_messages = prompt_messages[:-1]
+    #     # Strip final assistant turn if doing inference
+    #     if is_inference and prompt_messages and prompt_messages[-1]["role"] == "assistant":
+    #         prompt_messages = prompt_messages[:-1]
             
-        batch_conversations.append(prompt_messages)
+    #     batch_conversations.append(prompt_messages)
             
-    # Apply template to the ENTIRE batch at once
-    formatted_texts = tokenizer.apply_chat_template(
-        batch_conversations, 
-        tokenize=False, 
-        add_generation_prompt=is_inference
-    )
+    # # Apply template to the ENTIRE batch at once
+    # formatted_texts = tokenizer.apply_chat_template(
+    #     batch_conversations, 
+    #     tokenize=False, 
+    #     add_generation_prompt=is_inference
+    # )
         
-    return {"text": formatted_texts}
+    # return {"text": formatted_texts}
 
 
 def get_formatting_function(dataset_id: str):
@@ -611,7 +617,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
             padding="max_length",
             truncation=True,
             max_length=suite.sft.cfg.max_seq_length,
-            return_tensors=None  # .map will handle conversion
+            return_tensors=None 
         ),
         batched=True,
         batch_size=1000,

@@ -1,26 +1,33 @@
 import gc
+from src.prune import convert_alpaca_to_messages, get_formatting_function
 import torch
 import numpy as np
 from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+from vllm.distributed.parallel_state import destroy_model_parallel
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import Dataset, load_dataset, get_dataset_config_names
 from huggingface_hub import create_repo
+import multiprocessing as mp
+from tqdm.auto import tqdm
 
 class GrapePipeline:
-    def __init__(self, 
-                 base_model_id, 
-                 hf_repo_id, 
-                 teacher_ids,
-                 dataset_id,
-                 prompt_column, 
-                 split, 
-                 sample_limit=None,
-                 gpu_utilization=0.9,
-                 max_tokens=512,
-                 max_model_len=2048):
+    def __init__(
+            self, 
+            base_model_id,
+            base_tokenizer_id,
+            hf_repo_id, 
+            teacher_ids,
+            dataset_id,
+            prompt_column, 
+            split, 
+            sample_limit=None,
+            gpu_utilization=0.95,
+            max_tokens=512,
+            max_model_len=2048):
         
         # Models & Hub Config
         self.base_model_id = base_model_id
+        self.base_tokenizer_id = base_tokenizer_id
         self.hf_repo_id = hf_repo_id
         self.teacher_ids = teacher_ids
         
@@ -28,7 +35,7 @@ class GrapePipeline:
         self.dataset_id = dataset_id
         self.prompt_column = prompt_column
         self.split = split
-        self.sample_size = sample_limit
+        self.sample_limit = sample_limit
         
         # vLLM Config
         self.gpu_utilization = gpu_utilization
@@ -40,6 +47,7 @@ class GrapePipeline:
 
     def _clean_vram(self):
         """Internal helper to reset GPU state."""
+        destroy_model_parallel()
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
@@ -51,10 +59,26 @@ class GrapePipeline:
 
         print(f"📥 Loading dataset '{self.dataset_id}' (split: {self.split})...")
         ds = load_dataset(self.dataset_id, split=self.split)
+        # formatter_func = get_formatting_function(self.dataset_id)
+        # ds = ds.map(
+        #     lambda examples: formatter_func(tokenizer, examples, is_inference=False),
+        #     batched=True,
+        #     batch_size=1000,  # batch_size,
+        #     num_proc=12,
+        # )
         
-        if self.sample_size and self.sample_size < len(ds):
-            print(f"🎲 Subsampling {self.sample_size} records from the dataset...")
-            ds = ds.shuffle(seed=42).select(range(self.sample_size))
+        if self.sample_limit and self.sample_limit < len(ds):
+            print(f"🎲 Subsampling {self.sample_limit} records from the dataset...")
+            ds = ds.shuffle(seed=42).select(range(self.sample_limit))
+
+        if "alpaca" in self.dataset_id.lower():
+            ds = ds.map(
+                convert_alpaca_to_messages,
+                batched=True,
+                batch_size=1000,
+                num_proc=12,
+                remove_columns=["instruction", "input", "output"],
+            )
             
         raw_prompts = ds[self.prompt_column]
         instructions = []
@@ -170,42 +194,59 @@ class GrapePipeline:
         print(f"✅ Subset 'all_candidates' pushed with {len(res_cols)} candidate options per prompt.")
 
     def _run_selection_phase(self):
-        """Loads base model, scores candidates via GRAPE using its chat template, and pushes final dataset."""
+        """Loads base model natively, scores candidates via GRAPE, and pushes final dataset."""
         print(f"⚖️ [Selection Phase] Loading Base Model: {self.base_model_id}")
         
         candidates_ds = load_dataset(self.hf_repo_id, "all_candidates", split="train")
-        tokenizer = AutoTokenizer.from_pretrained(self.base_model_id)
-        llm = LLM(model=self.base_model_id, 
-                  max_model_len=self.max_model_len, 
-                  gpu_memory_utilization=self.gpu_utilization)
+        tokenizer = AutoTokenizer.from_pretrained(self.base_tokenizer_id)
         
-        flattened_prompts = []
-        prompt_headers = []
-        mapping = []
-        
-        for idx, item in enumerate(candidates_ds):
-            messages = [{"role": "user", "content": item['instruction']}]
-            prompt_header = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            
-            for res in item["all_responses"]:
-                full_text = prompt_header + str(res)
-                flattened_prompts.append(full_text)
-                prompt_headers.append(prompt_header)
-                mapping.append(idx)
-
-        params = SamplingParams(max_tokens=1, prompt_logprobs=1)
-        outputs = llm.generate(flattened_prompts, params)
+        # 1. Load the model using standard PyTorch (no vLLM)
+        model = AutoModelForCausalLM.from_pretrained(
+            self.base_model_id, 
+            device_map="auto", 
+            dtype=torch.bfloat16,
+        )
+        model.eval()
         
         all_scores = []
-        for i, out in enumerate(outputs):
-            prompt_header = prompt_headers[i]
-            p_len = len(tokenizer.encode(prompt_header, add_special_tokens=False))
-            
-            logprob_dicts = out.prompt_logprobs[p_len:]
-            vals = [list(lp.values())[0].logprob for lp in logprob_dicts if lp]
-            all_scores.append(np.mean(vals) if vals else -100.0)
 
-        # Strict GRAPE Selection Logic (No Filtering)
+        print("🚀 Scoring candidates natively...")
+        # 2. Score candidates using a single forward pass per sequence
+        with torch.no_grad():
+            for idx, item in tqdm(enumerate(candidates_ds), total=len(candidates_ds)):
+                messages = [{"role": "user", "content": item['instruction']}]
+                prompt_header = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                
+                # Get the length of the prompt to ignore its tokens during scoring
+                prompt_len = tokenizer(prompt_header, return_tensors="pt").input_ids.shape[1]
+                
+                for res in item["all_responses"]:
+                    full_text = prompt_header + str(res)
+                    inputs = tokenizer(full_text, return_tensors="pt").to(model.device)
+                    
+                    # Forward pass
+                    outputs = model(**inputs)
+                    
+                    # Shift logits and labels for next-token prediction
+                    logits = outputs.logits[0, :-1, :]
+                    labels = inputs.input_ids[0, 1:]
+                    
+                    # Calculate log probabilities
+                    logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
+                    token_logprobs = torch.gather(logprobs, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+                    
+                    # Isolate the response tokens (skip the prompt tokens)
+                    response_logprobs = token_logprobs[prompt_len - 1:]
+                    
+                    score = response_logprobs.mean().item() if len(response_logprobs) > 0 else -100.0
+                    all_scores.append(score)
+
+        # 3. Clean up VRAM safely and naturally
+        del model
+        del tokenizer
+        self._clean_vram()
+
+        # 4. Strict GRAPE Selection Logic (No Filtering)
         final_rows = []
         ptr = 0
         win_counts = {}
@@ -229,10 +270,6 @@ class GrapePipeline:
             
             win_counts[winning_source] = win_counts.get(winning_source, 0) + 1
             ptr += num_cands
-
-        del llm
-        del tokenizer
-        self._clean_vram()
             
         print("\n🏆 --- Winning Candidate Distribution ---")
         total_kept = len(final_rows)
@@ -264,6 +301,8 @@ class GrapePipeline:
         # Fetch instructions and original data directly
         instructions = self._get_instructions(existing_configs)
 
+        ctx = mp.get_context("spawn")
+
         for teacher_id in self.teacher_ids:
             teacher_name = teacher_id.split("/")[-1].replace(".", "-")
             config_name = f"teacher_{teacher_name}"
@@ -271,8 +310,21 @@ class GrapePipeline:
             if config_name in existing_configs:
                 print(f"⏭️ Skipping {teacher_id}: '{config_name}' already exists on Hub.")
             else:
-                self._run_teacher_phase(teacher_id, instructions)
-            
+                print(f"🔥 Starting isolated process for: {teacher_id}")
+                
+                # Create an isolated subprocess for this specific teacher
+                p = ctx.Process(
+                    target=self._run_teacher_phase, 
+                    args=(teacher_id, instructions)
+                )
+                
+                p.start() # Starts the new process (and initializes CUDA safely inside it)
+                p.join()  # Halts the main script until this teacher completely finishes
+                
+                # Catch any crashes (like Out of Memory errors) inside the subprocess
+                if p.exitcode != 0:
+                    print(f"❌ Error: Process for {teacher_id} crashed with exit code {p.exitcode}")
+                    
         if "all_candidates" in existing_configs:
             print("⏭️ Skipping Compilation: 'all_candidates' already exists on Hub.")
         else:
