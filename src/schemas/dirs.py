@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, computed_field
 
@@ -19,7 +20,7 @@ class SuiteDirs(BaseModel):
 
     # --- INTERNAL HELPERS ---
 
-    def _ensure_dir(self, path: Path) -> Path:
+    def ensure_dir(self, path: Path) -> Path:
         """Creates the directory if it doesn't exist and returns the path."""
         path.mkdir(parents=True, exist_ok=True)
         return path
@@ -33,67 +34,86 @@ class SuiteDirs(BaseModel):
     @computed_field
     @property
     def models(self) -> Path:
-        return self._ensure_dir(self.output_dir / "models")
+        return self.ensure_dir(self.output_dir / "models")
 
     @computed_field
     @property
     def datasets(self) -> Path:
-        return self._ensure_dir(self.output_dir / "datasets" / self.ids.prune)
+        return self.ensure_dir(self.output_dir / "datasets" / self.ids.prune)
 
     @property # Just a property, not a computed field since it's private
     def _results_root(self) -> Path:
-        return self._ensure_dir(
-            self.suite_root / "results" / self.ids.experiment / self.timestamp
+        return self.ensure_dir(
+            self.suite_root / "results" / self.ids.experiment # / self.timestamp
         )
 
     @computed_field
     @property
-    def results(self) -> Path:
-        return self._ensure_dir(self._results_root / "main")
+    def main_results(self) -> Path:
+        return self.ensure_dir(self._results_root / "main")
+    
+    @computed_field
+    @property
+    def sota_results(self) -> Path:
+        return self.ensure_dir(self._results_root / "sota")
 
     @computed_field
     @property
     def null_dist_results(self) -> Path:
-        return self._ensure_dir(self._results_root / "null_dist")
+        return self.ensure_dir(self._results_root / "null_dist")
 
     @computed_field
     @property
     def base_model_root(self) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
-        return self._ensure_dir(self.models / "base_models" / name)
+        return self.ensure_dir(self.models / "base_models" / name)
 
     @computed_field
     @property
     def base_model_eval(self) -> Path:
-        return self._ensure_dir(self.base_model_root / self.ids.eval)
+        return self.ensure_dir(self.base_model_root / self.ids.eval)
 
     @computed_field
     @property
     def reference_model_root(self) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
-        return self._ensure_dir(self.models / "reference_models" / name)
+        return self.ensure_dir(self.models / "reference_models" / name)
 
     @computed_field
     @property
     def reference_model_eval(self) -> Path:
-        return self._ensure_dir(self.reference_model_root / self.ids.eval)
-
+        return self.ensure_dir(self.reference_model_root / self.ids.eval)
+    
     # --- STANDARD METHODS (Take arguments, NOT properties) ---
+    
+    def sota_model_root(self, method: Literal['grape', 's2l']) -> Path:
+        # name = Path(self.sft_cfg.base_model_id).name
+        return self.ensure_dir(self.models / "sota" / method)
+
+    def sota_model_eval(self, method: Literal['grape', 's2l']) -> Path:
+        return self.ensure_dir(self.sota_model_root(method=method) / self.ids.eval)
+    
+    def get_sota_model_gen_cache(self, method: Literal["grape", "s2l"], max_new_tokens: int) -> Path:
+        return self.ensure_dir(
+            self.sota_model_root(method=method)
+            / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
+        )
+
 
     def get_base_model_gen_cache(self, max_new_tokens: int) -> Path:
-        return self._ensure_dir(
+        return self.ensure_dir(
             self.base_model_root
             / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
         )
 
     def get_ref_model_root_by_seed(self, seed: int) -> Path:
-        return self._ensure_dir(self.reference_model_root / f"seed_{seed}")
+        return self.ensure_dir(self.reference_model_root / f"seed_{seed}")
 
     def get_ref_model_eval_by_seed(self, seed: int) -> Path:
-        return self._ensure_dir(self.get_ref_model_root_by_seed(seed) / self.ids.eval)
+        return self.ensure_dir(self.get_ref_model_root_by_seed(seed) / self.ids.eval)
     
     def get_ref_model_gen_cache_by_seed(self, seed: int, max_new_tokens: int) -> Path:
-        return self._ensure_dir(
+        return self.ensure_dir(
             self.get_ref_model_root_by_seed(seed)
             / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
         )
@@ -105,26 +125,27 @@ class SuiteDirs(BaseModel):
         the feature reports prior to the auto-creation by HF datasets lib.
         """
         name = Path(self.prune_cfg.dataset_id).name
-        return self._ensure_dir(self.datasets / f"{name}_ds{dataset_size}_topk{topk}.hf")
+        return self.ensure_dir(self.datasets / f"{name}_ds{dataset_size}_topk{topk}.hf")
 
     def get_trained_model_root(self, dataset_size: int, topk: int) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
-        return self._ensure_dir(
+        return self.ensure_dir(
             self.models
             / "trained"
-            / f"{self.ids.prune}_{self.ids.sft}"  # self.ids.prune / self.ids.sft
+            / self.ids.prune
+            / self.ids.sft
             / f"ds{dataset_size}_topk{topk}_{name}"
         )
 
     def get_trained_model_eval(self, dataset_size: int, topk: int) -> Path:
-        return self._ensure_dir(
+        return self.ensure_dir(
             self.get_trained_model_root(dataset_size, topk)
             / self.ids.eval
-            / f"top{topk}"
+            # / f"top{topk}"
         )
     
     def get_trained_model_gen_cache(self, dataset_size: int, topk: int, max_new_tokens: int) -> Path:
-        return self._ensure_dir(
+        return self.ensure_dir(
             self.get_trained_model_root(dataset_size, topk)
             / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
         )

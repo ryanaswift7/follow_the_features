@@ -187,7 +187,7 @@ def run_experiments(suite: SuiteConfig):
 
     # Save to JSON if a path is specified
     # if id_save_path:
-    save_path = Path(suite.dirs.results) /"suite_ids.json"
+    save_path = Path(suite.dirs.main_results) /"suite_ids.json"
     # Ensure the parent directories exist
     save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(save_path, "w") as f:

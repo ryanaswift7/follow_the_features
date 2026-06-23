@@ -18,6 +18,7 @@ from src.utils.constants import (
 from src.utils.enums import ModelType
 from src.utils.evals import eval_and_save
 from src.utils.ensure_pad_token import ensure_pad_token
+from src.utils.load_model_and_tokenizer import load_model_and_tokenizer
 
 
 # def run_eval(
@@ -69,9 +70,11 @@ def run_eval(
         max_new_tokens=suite.eval.cfg.max_new_tokens,
     )
     print(f"Loading Adapter: {adapter_path}")
-    model = AutoModelForCausalLM.from_pretrained(adapter_path, device_map="auto",  dtype=torch.bfloat16)
-    tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
-    model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+    # model = AutoModelForCausalLM.from_pretrained(adapter_path, device_map="auto",  dtype=torch.bfloat16)
+    # tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
+    # model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+
+    model, tokenizer = load_model_and_tokenizer(model_id=adapter_path, tokenizer_id=suite.sft.cfg.tokenizer_id, is_inference=True)
 
     eval_and_save(
         model=model,
@@ -132,11 +135,12 @@ def verify_or_run_baseline(
     print(f"Evaluating {model_type.name} model ({model_id})...")
 
     if model_type == ModelType.BASE:
-        tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, device_map="auto", torch_dtype=torch.bfloat16
-        )
-        model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+        model, tokenizer = load_model_and_tokenizer(model_id=model_id, tokenizer_id=suite.sft.cfg.tokenizer_id, is_inference=True)
+        # tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
+        # model = AutoModelForCausalLM.from_pretrained(
+        #     model_id, device_map="auto", torch_dtype=torch.bfloat16
+        # )
+        # model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
 
         eval_and_save(
             model=model,

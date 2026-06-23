@@ -20,8 +20,8 @@ from src.utils.constants import (
     INVALID_JUDGE_LOG_FILENAME,
 )
 from src.utils.enums import ModelType
-from src.utils.evaluator import Evaluator
-from src.utils.ollama_manager import OllamaManager
+from src.custom_judge.evaluator import Evaluator
+from src.custom_judge.ollama_manager import OllamaManager
 
 
 def write_eval_results_and_config(
@@ -109,10 +109,13 @@ def run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir: Path) -> Tuple[Di
     lm_eval_results = {}
     raw_lm_eval_scores = {}
 
-    print("Preparing model for LM Eval: Saving device map and moving to cuda:0...")
-    original_map = model.hf_device_map
-    remove_hook_from_module(model, recurse=True)
-    model.to("cuda:0")
+    need_restore_map = False
+    if getattr(model, "hf_device_map", None) is not None:
+        print("Preparing model for LM Eval: Saving device map and moving to cuda:0...")
+        original_map = model.hf_device_map
+        remove_hook_from_module(model, recurse=True)
+        model.to("cuda:0")
+        need_restore_map = True
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -146,8 +149,9 @@ def run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir: Path) -> Tuple[Di
         apply_chat_template=True,
     )
 
-    print("LM Eval complete. Restoring original multi-GPU device map...")
-    dispatch_model(model, device_map=original_map)
+    if need_restore_map:
+        print("LM Eval complete. Restoring original multi-GPU device map...")
+        dispatch_model(model, device_map=original_map)
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -523,6 +527,9 @@ def eval_and_save(
     save_results_and_config: bool = True,
     ref_model_seed: Optional[int] = None,
 ) -> Tuple[dict, Optional[dict]]:
+
+    print("CHANGING PADDING SIDE TO 'left' FOR INFERENCE")
+    tokenizer.padding_side = 'left'
 
     print("\n\n" + "#"*70)
     print("### STARTING EVALUATION AND SAVE PIPELINE ###")

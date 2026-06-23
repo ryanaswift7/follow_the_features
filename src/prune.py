@@ -21,7 +21,7 @@ import numpy as np
 from src.schemas.suite import SuiteConfig
 from src.utils.constants import DATASET_CONFIG_FILENAME, PRUNE_ID_KEY
 from src.utils.feature_reports import write_full_feature_report_csv, write_topk_feature_report_json
-from src.utils.ensure_pad_token import ensure_pad_token
+from src.utils.ensure_pad_token import ensure_pad_token, ensure_pad_token_hooked_transformer
 
 
 def estimate_vasicek_entropy(vals: np.ndarray):
@@ -583,12 +583,16 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     feat_agg_method = suite.prune.cfg.feat_agg_method
 
     print(f"--- Prune: dataset_size={dataset_size}, topk={topk} ---")
-    tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
-    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    # tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
+    # tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    # tokenizer.padding_side = 'left'  # for inference
     model = HookedTransformer.from_pretrained_no_processing(
         model_id, device=device, dtype=torch.bfloat16
     )
     # model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+
+    model, tokenizer = ensure_pad_token_hooked_transformer(model=model, is_inference=True)
+    chat_tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
 
     sae, _, _ = SAE.from_pretrained_with_cfg_and_sparsity(
         release=sae_release, sae_id=sae_id, device=device
@@ -610,10 +614,23 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
         batch_size=1000,  # batch_size,
         num_proc=12,
     )
+    chat_str_dataset = str_dataset.map(
+        lambda batch: {
+            "text": [
+                chat_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False) 
+                for messages in batch["messages"]
+            ]
+        },
+        batched=True,
+        batch_size=1000,
+        num_proc=12,
+    )
 
-    tokenized_dataset = str_dataset.map(
+
+    tokenized_dataset = chat_str_dataset.map(
         lambda examples: tokenizer(
             examples["text"],
+            # examples["messages"],
             padding="max_length",
             truncation=True,
             max_length=suite.sft.cfg.max_seq_length,

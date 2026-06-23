@@ -16,6 +16,7 @@ from trl.trainer.sft_trainer import SFTTrainer
 from src.schemas.suite import SuiteConfig
 from src.utils.constants import MODEL_CONFIG_FILENAME, PRUNE_ID_KEY, SFT_ID_KEY
 from src.utils.ensure_pad_token import ensure_pad_token
+from src.utils.load_model_and_tokenizer import load_model_and_tokenizer
 
 PEFT_CONFIG = LoraConfig(
     r=16,
@@ -93,12 +94,15 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     batch_size = suite.prune.params.batch_size
 
     dataset = load_from_disk(dataset_path)
+    
     # dataset = dataset.map(format_to_conversation, remove_columns=dataset.column_names)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, fix_mistral_regex=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map="auto", torch_dtype=torch.bfloat16
-    )
-    model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+    # tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, fix_mistral_regex=True)
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     model_id, device_map="auto", torch_dtype=torch.bfloat16
+    # )
+    # model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
+
+    model, tokenizer = load_model_and_tokenizer(model_id=model_id, tokenizer_id=tokenizer_id, is_inference=False)
 
     formatter_func = get_formatting_function(dataset_id)
     dataset = dataset.map(

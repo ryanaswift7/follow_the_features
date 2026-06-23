@@ -116,7 +116,7 @@ def plot_experiment_results(
 
     # --- NEW: GLOBAL SUMMARY TABLE (ALL RESULTS) ---
     # Create the root tables directory if it doesn't exist
-    global_table_path = suite.dirs.results / "tables"
+    global_table_path = suite.dirs.main_results / "tables"
     global_table_path.mkdir(parents=True, exist_ok=True)
 
     # Prepare Global DataFrame
@@ -154,8 +154,8 @@ def plot_experiment_results(
 
         # Create subdirectories
         k_dir = f"top{k}"
-        plot_path = suite.dirs.results / "plots" / k_dir
-        table_path = suite.dirs.results / "tables" / k_dir
+        plot_path = suite.dirs.main_results / "plots" / k_dir
+        table_path = suite.dirs.main_results / "tables" / k_dir
         plot_path.mkdir(parents=True, exist_ok=True)
         table_path.mkdir(parents=True, exist_ok=True)
 

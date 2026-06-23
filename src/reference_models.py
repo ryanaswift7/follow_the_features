@@ -15,6 +15,7 @@ from src.utils.constants import EVAL_CONFIG_FILENAME, EVAL_RESULTS_FILENAME
 from src.utils.enums import ModelType
 from src.utils.evals import eval_and_save
 from src.utils.ensure_pad_token import ensure_pad_token
+from src.utils.load_model_and_tokenizer import load_model_and_tokenizer
 
 
 def parse_args():
@@ -80,8 +81,8 @@ def generate_reference_models(suite: SuiteConfig):
 
     # 3. CONDITIONALLY LOAD DATA: Only load tokenizer and map datasets if at least one model needs it
     if models_to_train:
-        print(f"[REF MODELS] Loading tokenizer: {suite.sft.cfg.tokenizer_id}...")
-        tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
+        # print(f"[REF MODELS] Loading tokenizer: {suite.sft.cfg.tokenizer_id}...")
+        # tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
 
         print(f"[REF MODELS] Loading dataset: {dataset_id}...")
         if "ultrachat" in dataset_id:
@@ -102,16 +103,16 @@ def generate_reference_models(suite: SuiteConfig):
 
         # 1. Standardize to "messages" format ONLY if it's Alpaca
         # if "alpaca" in dataset_id:
-        # print("[REF MODELS] Converting Alpaca to standard messages format...")
-        print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
-        formatter_func = get_formatting_function(dataset_id)
-        full_ds = full_ds.map(
-            lambda examples: formatter_func(tokenizer, examples, is_inference=False),
-            batched=True,
-            batch_size=batch_size,
-            desc="Tokenizing Data",
-            remove_columns=full_ds.column_names,
-        )
+        # # print("[REF MODELS] Converting Alpaca to standard messages format...")
+        # print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
+        # formatter_func = get_formatting_function(dataset_id)
+        # full_ds = full_ds.map(
+        #     lambda examples: formatter_func(tokenizer, examples, is_inference=False),
+        #     batched=True,
+        #     batch_size=batch_size,
+        #     desc="Tokenizing Data",
+        #     remove_columns=full_ds.column_names,
+        # )
             # full_ds = full_ds.map(
             #     format_to_conversation,
             #     remove_columns=full_ds.column_names,
@@ -167,25 +168,39 @@ def generate_reference_models(suite: SuiteConfig):
 
             if has_adapter:
                 # Load base model then apply PEFT adapter
-                eval_model = AutoModelForCausalLM.from_pretrained(
-                    base_model_id, device_map="auto", torch_dtype=torch.bfloat16
-                )
+                eval_model, tokenizer = load_model_and_tokenizer(model_id=base_model_id, tokenizer_id=trial_output_dir, is_inference=True)
+                # eval_model = AutoModelForCausalLM.from_pretrained(
+                #     base_model_id, device_map="auto", torch_dtype=torch.bfloat16
+                # )
                 eval_model.load_adapter(str(trial_output_dir))
             else:
-                # Load full finetuned model
-                eval_model = AutoModelForCausalLM.from_pretrained(
-                    trial_output_dir, device_map="auto", torch_dtype=torch.bfloat16
-                )
+                eval_model, tokenizer = load_model_and_tokenizer(model_id=trial_output_dir, tokenizer_id=trial_output_dir, is_inference=True)
+                # eval_model = AutoModelForCausalLM.from_pretrained(
+                #     trial_output_dir, device_map="auto", torch_dtype=torch.bfloat16
+                # )
         else:
             # --- Training Execution (if model doesn't exist) ---
-            dataset = full_ds.shuffle(seed=trial_seed)
             # print(json.dumps(dataset[0], indent=4))
 
-            eval_model = AutoModelForCausalLM.from_pretrained(
-                base_model_id, device_map="auto", torch_dtype=torch.bfloat16
-            )
+            # eval_model = AutoModelForCausalLM.from_pretrained(
+            #     base_model_id, device_map="auto", torch_dtype=torch.bfloat16
+            # )
 
-            eval_model, tokenizer = ensure_pad_token(model=eval_model, tokenizer=tokenizer)
+            # eval_model, tokenizer = ensure_pad_token(model=eval_model, tokenizer=tokenizer)
+            eval_model, tokenizer = load_model_and_tokenizer(model_id=base_model_id, tokenizer_id=suite.sft.cfg.tokenizer_id, is_inference=False)
+
+
+            print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
+            formatter_func = get_formatting_function(dataset_id)
+            full_ds = full_ds.map(
+                lambda examples: formatter_func(tokenizer, examples, is_inference=False),
+                batched=True,
+                batch_size=batch_size,
+                desc="Tokenizing Data",
+                remove_columns=full_ds.column_names,
+            )
+            dataset = full_ds.shuffle(seed=trial_seed)
+
 
             trainer_args = generate_sft_trainer_args(
                 suite=suite, output_dir=str(trial_output_dir)

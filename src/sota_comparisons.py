@@ -61,7 +61,7 @@ def save_sota_df(sota_df: pd.DataFrame, output_dir: Path, filename: str) -> pd.D
 def olmo3_comp(suite: SuiteConfig):
     rows = []
     filename = "olmo3_comp_pt"
-    sota_dir = suite.dirs._ensure_dir(suite.dirs.results / "sota")
+    sota_dir = suite.dirs.ensure_dir(suite.dirs.main_results / "sota")
     OLMO3_COMP = "allenai/Olmo-3-7B-Instruct-SFT"
 
     # for model_name in LLAMA2_SOTA_MODELS:
@@ -70,7 +70,7 @@ def olmo3_comp(suite: SuiteConfig):
     tokenizer = AutoTokenizer.from_pretrained(OLMO3_COMP, fix_mistral_regex=True)
     model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
 
-    sota_gen_cache_dir = suite.dirs._ensure_dir(
+    sota_gen_cache_dir = suite.dirs.ensure_dir(
         sota_dir
         / OLMO3_COMP
         / suite.dirs.get_generation_cache_subdir(
@@ -126,7 +126,7 @@ def llama2_comps(suite: SuiteConfig):
     ]
     RESULTS_FILENAME = "llama2_comps"
 
-    sota_dir = suite.dirs._ensure_dir(suite.dirs.results / "sota")
+    sota_dir = suite.dirs.ensure_dir(suite.dirs.main_results / "sota")
 
     for model_name in LLAMA2_SOTA_MODELS:
         # tokenizer = model_name if "detia" not in model_name else TOKENIZER
@@ -134,7 +134,7 @@ def llama2_comps(suite: SuiteConfig):
         tokenizer = AutoTokenizer.from_pretrained(TOKENIZER, fix_mistral_regex=True)
         model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
 
-        sota_gen_cache_dir = suite.dirs._ensure_dir(
+        sota_gen_cache_dir = suite.dirs.ensure_dir(
             sota_dir
             / model_name
             / suite.dirs.get_generation_cache_subdir(
