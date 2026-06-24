@@ -9,7 +9,7 @@ class PruneConfig(BaseModel):
     sae_id: str
     dataset_id: str
     num_samples: int
-    seq_agg_method: Literal["sum", "mean", "max"]
+    seq_agg_method: Literal["sum", "mean", "max", "last_token"]
     feat_agg_method: Literal["sum", "mean"]
     divide_by_entropy: bool
 

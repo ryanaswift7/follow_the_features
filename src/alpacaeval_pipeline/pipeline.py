@@ -25,8 +25,7 @@ class AlpacaEvalPipeline:
                     "max_tokens": max_tokens, 
                     "temperature": 0.0,
                     "client_kwargs": {
-                        "base_url": base_url,
-                        "api_key": "EMPTY"
+                        "base_url": base_url
                     }
                 },
                 "fn_completion_parser": "regex_parser",

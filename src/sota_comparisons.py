@@ -74,7 +74,7 @@ def olmo3_comp(suite: SuiteConfig):
         sota_dir
         / OLMO3_COMP
         / suite.dirs.get_generation_cache_subdir(
-            max_new_tokens=suite.eval.cfg.max_new_tokens)
+            max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens)
     )
 
     sota_results, _ = eval_and_save(
@@ -138,7 +138,7 @@ def llama2_comps(suite: SuiteConfig):
             sota_dir
             / model_name
             / suite.dirs.get_generation_cache_subdir(
-                max_new_tokens=suite.eval.cfg.max_new_tokens)
+                max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens)
         )
 
         sota_results, _ = eval_and_save(
@@ -371,7 +371,7 @@ def run_modern_comps(suite, base_dataset_id, grape_teacher_models, base_models, 
             
             gen_cache_dir = suite.dirs._ensure_dir(
                 model_dir / suite.dirs.get_generation_cache_subdir(
-                    max_new_tokens=suite.eval.cfg.max_new_tokens
+                    max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens
                 )
             )
 

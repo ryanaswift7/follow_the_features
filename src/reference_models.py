@@ -1,11 +1,11 @@
 import argparse
 import gc
 import json
+from typing import Any, Dict
 
 import torch
 from datasets import load_dataset
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl.trainer.sft_trainer import SFTTrainer
 
 from src.prune import get_formatting_function
@@ -14,13 +14,12 @@ from src.sft import PEFT_CONFIG, generate_sft_trainer_args
 from src.utils.constants import EVAL_CONFIG_FILENAME, EVAL_RESULTS_FILENAME
 from src.utils.enums import ModelType
 from src.utils.evals import eval_and_save
-from src.utils.ensure_pad_token import ensure_pad_token
 from src.utils.load_model_and_tokenizer import load_model_and_tokenizer
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate null distribution for experiment suite based on configuration file."
+        description="Generate reference models for an experiment suite based on a configuration file."
     )
     parser.add_argument(
         "--config",
@@ -38,16 +37,61 @@ def parse_args():
     return parser.parse_args()
 
 
-def generate_reference_models(suite: SuiteConfig):
+def _mean_numeric_dicts(dicts: list[dict[str, Any]]) -> dict[str, Any]:
+    if not dicts:
+        return {}
+
+    numeric_keys = set()
+    for item in dicts:
+        for key, value in item.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                numeric_keys.add(key)
+
+    aggregated: dict[str, Any] = {}
+    for key in sorted(numeric_keys):
+        values = [
+            item[key]
+            for item in dicts
+            if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)
+        ]
+        if values:
+            aggregated[key] = round(sum(values) / len(values), 4)
+    return aggregated
+
+
+def _trial_has_valid_results(trial_output_dir, suite: SuiteConfig, expected_sections: list[str]) -> bool:
+    results_path = trial_output_dir / EVAL_RESULTS_FILENAME
+    config_path = trial_output_dir / EVAL_CONFIG_FILENAME
+    if not (results_path.exists() and config_path.exists()):
+        return False
+
+    try:
+        with open(results_path, "r") as f:
+            results = json.load(f)
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    if cfg.get("eval_id") != suite.ids.eval:
+        return False
+
+    return all(isinstance(results, dict) and results.get(section) is not None for section in expected_sections)
+
+
+def generate_reference_models(
+    suite: SuiteConfig,
+    run_lm_eval: bool = True,
+    run_judge_eval: bool = True,
+):
     num_ref_models = suite.eval.cfg.num_ref_models
     dataset_id = suite.prune.cfg.dataset_id
     batch_size = suite.prune.params.batch_size
     seed = suite.seed
     base_model_id = suite.sft.cfg.base_model_id
 
-    # Define overall output paths
-    overall_results_path = suite.dirs.reference_model_eval / EVAL_RESULTS_FILENAME
-    overall_config_path = suite.dirs.reference_model_eval / EVAL_CONFIG_FILENAME
+    overall_results_path = suite.dirs.reference_model_summary_eval / EVAL_RESULTS_FILENAME
+    overall_config_path = suite.dirs.reference_model_summary_eval / EVAL_CONFIG_FILENAME
 
     print(f"\n{'=' * 50}")
     print("[REF MODELS] Initializing Reference Model Generator")
@@ -57,40 +101,44 @@ def generate_reference_models(suite: SuiteConfig):
     print("  - Training on:  FULL DATASET")
     print(f"{'=' * 50}\n")
 
-    # 1. OVERALL CHECK: Skip everything if the final aggregated files already exist
-    if overall_results_path.exists() and overall_config_path.exists():
-        print(
-            "[REF MODELS] Overall evaluation results and config already present. Skipping generation."
-        )
-        with open(overall_results_path, "r") as f:
-            final_mean_scores = json.load(f)
-        with open(overall_config_path, "r") as f:
-            cfg = json.load(f)
-        return final_mean_scores, cfg
+    if not (run_lm_eval or run_judge_eval):
+        print("[REF MODELS] Both LM eval and judge eval are disabled. Nothing to do.")
+        return {}, None
 
-    # 2. PRE-CHECK INDIVIDUAL MODELS: Determine if we actually need to load the dataset
+    expected_sections: list[str] = []
+    if run_lm_eval:
+        expected_sections.append("lm_eval_results")
+    if run_judge_eval:
+        expected_sections.append("reference_results")
+
+    if overall_results_path.exists() and overall_config_path.exists():
+        try:
+            with open(overall_results_path, "r") as f:
+                final_results = json.load(f)
+            with open(overall_config_path, "r") as f:
+                cfg = json.load(f)
+            if cfg.get("eval_id") == suite.ids.eval and all(
+                isinstance(final_results, dict) and final_results.get(section) is not None
+                for section in expected_sections
+            ):
+                print("[REF MODELS] Cached aggregate reference results found. Skipping generation.")
+                return final_results, cfg
+        except (json.JSONDecodeError, OSError):
+            pass
+
     models_to_train = []
     for i in range(num_ref_models):
         trial_seed = seed + i
         trial_output_dir = suite.dirs.get_ref_model_root_by_seed(trial_seed)
-        if not (
-            (trial_output_dir / EVAL_RESULTS_FILENAME).exists()
-            and (trial_output_dir / EVAL_CONFIG_FILENAME).exists()
-        ):
+        if not _trial_has_valid_results(trial_output_dir, suite, expected_sections):
             models_to_train.append(i)
 
-    # 3. CONDITIONALLY LOAD DATA: Only load tokenizer and map datasets if at least one model needs it
     if models_to_train:
-        # print(f"[REF MODELS] Loading tokenizer: {suite.sft.cfg.tokenizer_id}...")
-        # tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
-
         print(f"[REF MODELS] Loading dataset: {dataset_id}...")
         if "ultrachat" in dataset_id:
-            # handle different split name in ultrachat 200k
             full_ds = load_dataset(dataset_id, split="train_sft")
         else:
             full_ds = load_dataset(dataset_id, split="train")
-        # full_ds = load_dataset(dataset_id, split="train")
 
         if suite.debug_mode:
             full_ds = full_ds.select(range(1))
@@ -99,40 +147,17 @@ def generate_reference_models(suite: SuiteConfig):
             full_ds = full_ds.select(range(suite.prune.cfg.num_samples))
 
         full_ds_len = len(full_ds)
-
-
-        # 1. Standardize to "messages" format ONLY if it's Alpaca
-        # if "alpaca" in dataset_id:
-        # # print("[REF MODELS] Converting Alpaca to standard messages format...")
-        # print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
-        # formatter_func = get_formatting_function(dataset_id)
-        # full_ds = full_ds.map(
-        #     lambda examples: formatter_func(tokenizer, examples, is_inference=False),
-        #     batched=True,
-        #     batch_size=batch_size,
-        #     desc="Tokenizing Data",
-        #     remove_columns=full_ds.column_names,
-        # )
-            # full_ds = full_ds.map(
-            #     format_to_conversation,
-            #     remove_columns=full_ds.column_names,
-            # )
-        # full_ds = full_ds.map(
-        #     format_to_conversation,
-        #     remove_columns=full_ds.column_names,
-        # )
     else:
-        print(
-            "[REF MODELS] All individual reference models have existing results. Skipping dataset loading."
-        )
+        print("[REF MODELS] All individual reference models already have valid cached results.")
+        full_ds = None
+        full_ds_len = None
 
-    all_trials_scores = []
-    cfg = None  # Fallback config
+    all_lm_scores: list[dict[str, Any]] = []
+    all_judge_scores: list[dict[str, Any]] = []
+    cfg = None
 
     print("\n[REF MODELS] Processing Reference Models...")
-    pbar_models = tqdm(
-        range(num_ref_models), desc="Training/Loading Ref Models", position=0
-    )
+    pbar_models = tqdm(range(num_ref_models), desc="Training/Loading Ref Models", position=0)
 
     for i in pbar_models:
         trial_seed = seed + i
@@ -144,20 +169,19 @@ def generate_reference_models(suite: SuiteConfig):
 
         pbar_models.set_description(f"Ref Model {i + 1}/{num_ref_models}")
 
-        # 4. INDIVIDUAL TRIAL CHECK: Load results if they exist, skip everything else
-        if trial_results_path.exists() and trial_config_path.exists():
-            print(
-                f"\n[REF MODELS] Results for Ref Model {i + 1} already present. Loading cached results."
-            )
+        if _trial_has_valid_results(trial_output_dir, suite, expected_sections):
+            print(f"\n[REF MODELS] Cached results for Ref Model {i + 1} are valid. Loading.")
             with open(trial_results_path, "r") as f:
                 current_scores = json.load(f)
             with open(trial_config_path, "r") as f:
                 cfg = json.load(f)
 
-            all_trials_scores.append(current_scores)
+            if run_lm_eval and current_scores.get("lm_eval_results") is not None:
+                all_lm_scores.append(current_scores["lm_eval_results"])
+            if run_judge_eval and current_scores.get("reference_results") is not None:
+                all_judge_scores.append(current_scores["reference_results"])
             continue
 
-        # 5. MODEL WEIGHTS CHECK: If model is saved but no results exist, load model and skip training
         has_full_model = (trial_output_dir / "config.json").exists()
         has_adapter = (trial_output_dir / "adapter_config.json").exists()
 
@@ -165,30 +189,25 @@ def generate_reference_models(suite: SuiteConfig):
             print(
                 f"\n[REF MODELS] Model weights found in {trial_output_dir}. Skipping training, loading for evaluation."
             )
-
             if has_adapter:
-                # Load base model then apply PEFT adapter
-                eval_model, tokenizer = load_model_and_tokenizer(model_id=base_model_id, tokenizer_id=trial_output_dir, is_inference=True)
-                # eval_model = AutoModelForCausalLM.from_pretrained(
-                #     base_model_id, device_map="auto", torch_dtype=torch.bfloat16
-                # )
+                eval_model, tokenizer = load_model_and_tokenizer(
+                    model_id=base_model_id,
+                    tokenizer_id=trial_output_dir,
+                    is_inference=True,
+                )
                 eval_model.load_adapter(str(trial_output_dir))
             else:
-                eval_model, tokenizer = load_model_and_tokenizer(model_id=trial_output_dir, tokenizer_id=trial_output_dir, is_inference=True)
-                # eval_model = AutoModelForCausalLM.from_pretrained(
-                #     trial_output_dir, device_map="auto", torch_dtype=torch.bfloat16
-                # )
+                eval_model, tokenizer = load_model_and_tokenizer(
+                    model_id=trial_output_dir,
+                    tokenizer_id=trial_output_dir,
+                    is_inference=True,
+                )
         else:
-            # --- Training Execution (if model doesn't exist) ---
-            # print(json.dumps(dataset[0], indent=4))
-
-            # eval_model = AutoModelForCausalLM.from_pretrained(
-            #     base_model_id, device_map="auto", torch_dtype=torch.bfloat16
-            # )
-
-            # eval_model, tokenizer = ensure_pad_token(model=eval_model, tokenizer=tokenizer)
-            eval_model, tokenizer = load_model_and_tokenizer(model_id=base_model_id, tokenizer_id=suite.sft.cfg.tokenizer_id, is_inference=False)
-
+            eval_model, tokenizer = load_model_and_tokenizer(
+                model_id=base_model_id,
+                tokenizer_id=suite.sft.cfg.tokenizer_id,
+                is_inference=False,
+            )
 
             print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
             formatter_func = get_formatting_function(dataset_id)
@@ -201,11 +220,10 @@ def generate_reference_models(suite: SuiteConfig):
             )
             dataset = full_ds.shuffle(seed=trial_seed)
 
-
             trainer_args = generate_sft_trainer_args(
-                suite=suite, output_dir=str(trial_output_dir)
+                suite=suite,
+                output_dir=str(trial_output_dir),
             )
-            # trainer_args.disable_tqdm = True
 
             trainer = SFTTrainer(
                 model=eval_model,
@@ -222,7 +240,6 @@ def generate_reference_models(suite: SuiteConfig):
 
             eval_model = merged_model
 
-        # --- Evaluation Execution ---
         current_scores, cfg = eval_and_save(
             model=eval_model,
             tokenizer=tokenizer,
@@ -233,32 +250,29 @@ def generate_reference_models(suite: SuiteConfig):
             save_results_and_config=True,
             ref_model_seed=trial_seed,
             gen_cache_dir=suite.dirs.get_ref_model_gen_cache_by_seed(
-                seed=trial_seed, max_new_tokens=suite.eval.cfg.max_new_tokens),
+                seed=trial_seed,
+                max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens,
+            ),
         )
 
-        all_trials_scores.append(current_scores["lm_eval_results"])
+        if run_lm_eval and current_scores.get("lm_eval_results") is not None:
+            all_lm_scores.append(current_scores["lm_eval_results"])
+        if run_judge_eval and current_scores.get("reference_results") is not None:
+            all_judge_scores.append(current_scores["reference_results"])
 
-        # Cleanup memory
         del eval_model
         if "trainer" in locals():
             del trainer
         gc.collect()
         torch.cuda.empty_cache()
 
-    print("\n[REF MODELS] Calculating Mean Scores across Reference Models...")
+    final_results: dict[str, Any] = {}
+    if run_lm_eval:
+        final_results["lm_eval_results"] = _mean_numeric_dicts(all_lm_scores)
+    if run_judge_eval:
+        final_results["reference_results"] = _mean_numeric_dicts(all_judge_scores)
 
-    final_mean_scores = {}
-
-    if all_trials_scores:
-        keys = all_trials_scores[0].keys()
-        for key in keys:
-            values = [trial.get(key) for trial in all_trials_scores if key in trial]
-            final_mean_scores[key] = round(sum(values) / len(values), 4)
-    
-    final_results = {"lm_eval_results": final_mean_scores}
-
-    # OVERALL SAVE: Save the aggregated results so we can skip this entirely next time
-    suite.dirs.reference_model_eval.mkdir(parents=True, exist_ok=True)
+    suite.dirs.reference_model_summary_eval.mkdir(parents=True, exist_ok=True)
     with open(overall_results_path, "w") as f:
         json.dump(final_results, f, indent=4)
     with open(overall_config_path, "w") as f:

@@ -1,0 +1,550 @@
+from __future__ import annotations
+
+import gc
+import re
+import json
+import shutil
+import shlex
+import socket
+import subprocess
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterator
+
+import pandas as pd
+import requests
+import torch
+import yaml
+from huggingface_hub import hf_hub_download
+
+from src.schemas.suite import SuiteConfig
+
+
+def _alpaca_eval_package_root() -> Path:
+    import alpaca_eval
+
+    return Path(alpaca_eval.__file__).resolve().parent
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _safe_path_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_") or "model"
+
+
+def _model_configs_root() -> Path:
+    return _repo_root() / "configs" / "model_configs"
+
+
+def _resolve_model_config_identity(
+    suite: SuiteConfig,
+    model_type: str | ModelType,
+    dataset_size: int | None = None,
+    topk: int | None = None,
+    ref_model_seed: int | None = None,
+) -> tuple[str, str, Path]:
+    base_model_slug = _safe_path_component(suite.sft.cfg.base_model_id)
+    kind = getattr(model_type, "value", model_type)
+
+    if kind == "base":
+        model_key = f"fdp_base_{base_model_slug}"
+        model_dir = _model_configs_root() / "base_models" / base_model_slug
+    elif kind == "reference":
+        if ref_model_seed is None:
+            raise ValueError("ref_model_seed must be provided for reference model AlpacaEval configs.")
+        model_key = f"fdp_reference_seed_{ref_model_seed}_{base_model_slug}"
+        model_dir = _model_configs_root() / "reference_models" / base_model_slug / f"seed_{ref_model_seed}"
+    elif kind == "adapter":
+        if dataset_size is None or topk is None:
+            raise ValueError("dataset_size and topk must be provided for adapter AlpacaEval configs.")
+        model_key = f"fdp_adapter_ds{dataset_size}_topk{topk}_{base_model_slug}"
+        model_dir = (
+            _model_configs_root()
+            / "trained_models"
+            / suite.ids.prune
+            / suite.ids.sft
+            / f"ds{dataset_size}_topk{topk}_{base_model_slug}"
+        )
+    else:
+        raise ValueError(f"Unsupported model_type: {model_type!r}")
+
+    return kind, model_key, model_dir
+
+
+def resolve_judge_model_name(suite: SuiteConfig) -> str:
+    model_name = suite.eval.cfg.alpacaeval.model_name
+    if not model_name:
+        raise ValueError(
+            "alpacaeval.model_name must be set when alpacaeval.run is enabled."
+        )
+    return model_name
+
+
+def resolve_eval_dataset_path(suite: SuiteConfig, eval_output_dir: Path) -> Path:
+    dataset_name = suite.eval.cfg.alpacaeval.dataset
+    if dataset_name not in {"alpaca_eval", "alpaca_eval_gpt4_baseline"}:
+        raise ValueError(
+            "alpacaeval.dataset must be either 'alpaca_eval' or 'alpaca_eval_gpt4_baseline'."
+        )
+
+    filename = f"{dataset_name}.json"
+    cache_path = Path(
+        hf_hub_download(
+            repo_id="tatsu-lab/alpaca_eval",
+            repo_type="dataset",
+            filename=filename,
+        )
+    )
+
+    local_dataset_path = (eval_output_dir / "alpaca_eval_dataset.json").resolve()
+    local_dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    if not local_dataset_path.exists():
+        shutil.copyfile(cache_path, local_dataset_path)
+    return local_dataset_path
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class LocalVllmServer:
+    def __init__(
+        self,
+        model_name: str,
+        server_kwargs: Dict[str, Any] | None = None,
+        host: str = "127.0.0.1",
+        port: int | None = None,
+    ):
+        self.model_name = model_name
+        self.server_kwargs = dict(server_kwargs or {})
+        self.host = host
+        self.port = port or _find_free_port()
+        self.process: subprocess.Popen | None = None
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}/v1"
+
+    def _build_cmd(self) -> list[str]:
+        cmd = [
+            "python",
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            self.model_name,
+            "--served-model-name",
+            self.model_name,
+            "--host",
+            self.host,
+            "--port",
+            str(self.port),
+        ]
+
+        if self.server_kwargs.get("tensor_parallel_size") is not None:
+            cmd += ["--tensor-parallel-size", str(self.server_kwargs["tensor_parallel_size"])]
+        if self.server_kwargs.get("gpu_memory_utilization") is not None:
+            cmd += ["--gpu-memory-utilization", str(self.server_kwargs["gpu_memory_utilization"])]
+        if self.server_kwargs.get("max_model_len") is not None:
+            cmd += ["--max-model-len", str(self.server_kwargs["max_model_len"])]
+        else:
+            cmd += ["--max-model-len", str(self.server_kwargs.get("default_max_model_len", 8192))]
+        if self.server_kwargs.get("dtype") is not None:
+            cmd += ["--dtype", str(self.server_kwargs["dtype"])]
+        if self.server_kwargs.get("trust_remote_code"):
+            cmd.append("--trust-remote-code")
+        if self.server_kwargs.get("swap_space") is not None:
+            cmd += ["--swap-space", str(self.server_kwargs["swap_space"])]
+        if self.server_kwargs.get("enforce_eager"):
+            cmd.append("--enforce-eager")
+        if self.server_kwargs.get("disable_log_stats"):
+            cmd.append("--disable-log-stats")
+
+        return cmd
+
+    def __enter__(self):
+        cmd = self._build_cmd()
+        print(
+            f"Starting local vLLM judge server on {self.base_url} for model {self.model_name}..."
+        )
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+
+        health_url = f"http://{self.host}:{self.port}/health"
+        while True:
+            try:
+                resp = requests.get(health_url, timeout=2)
+                if resp.status_code == 200:
+                    print("vLLM judge server is online and ready.")
+                    break
+            except requests.RequestException:
+                pass
+
+            if self.process.poll() is not None:
+                raise RuntimeError("vLLM judge server process crashed during startup.")
+            time.sleep(2)
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.process is None:
+            return
+
+        print("Shutting down local vLLM judge server...")
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=20)
+
+
+@contextmanager
+def managed_local_vllm_server(
+    model_name: str,
+    server_kwargs: Dict[str, Any] | None = None,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+) -> Iterator[LocalVllmServer]:
+    server = LocalVllmServer(model_name=model_name, server_kwargs=server_kwargs, host=host, port=port)
+    try:
+        with server:
+            yield server
+    finally:
+        pass
+
+
+def build_model_configs(
+    suite: SuiteConfig,
+    model_name: str,
+    prompt_template_path: Path,
+    model_path: str,
+    model_configs_dir: Path,
+    use_vllm_local_completions: bool = False,
+) -> Path:
+    model_dir = model_configs_dir.resolve()
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = model_dir / "configs.yaml"
+    prompt_path = model_dir / "prompt.txt"
+
+    if not prompt_path.exists():
+        prompt_path.write_text(prompt_template_path.read_text())
+
+    if config_path.exists():
+        return model_dir
+
+    fn_completions = (
+        "vllm_local_completions" if use_vllm_local_completions else "huggingface_local_completions"
+    )
+    completions_kwargs: Dict[str, Any] = {
+        "model_name": model_path,
+        "max_new_tokens": suite.eval.cfg.alpacaeval.max_new_tokens,
+        "temperature": 0.0,
+        "top_p": suite.eval.cfg.alpacaeval.top_p,
+        "batch_size": max(1, suite.eval.cfg.alpacaeval.batch_size),
+    }
+    if use_vllm_local_completions:
+        completions_kwargs["model_kwargs"] = {
+            "trust_remote_code": True,
+        }
+    else:
+        completions_kwargs["model_kwargs"] = {
+            "torch_dtype": "bfloat16",
+            "trust_remote_code": True,
+        }
+
+    model_cfg = {
+        model_name: {
+            "prompt_template": "prompt.txt",
+            "fn_completions": fn_completions,
+            "completions_kwargs": completions_kwargs,
+        }
+    }
+
+    with open(config_path, "w") as f:
+        yaml.safe_dump(model_cfg, f, sort_keys=False)
+    return model_dir
+
+
+def _filter_vllm_client_kwargs(client_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only OpenAI-compatible transport settings for local vLLM."""
+    filtered = dict(client_kwargs)
+    for key in ("api_key", "openai_api_key", "openai_api_keys"):
+        filtered.pop(key, None)
+    return filtered
+
+
+def _clear_stale_annotator_cache(annotator_dir: Path) -> None:
+    for cache_file in annotator_dir.glob("annotations_seed*_configs.json"):
+        cache_file.unlink(missing_ok=True)
+
+
+def build_annotators_config(
+    suite: SuiteConfig,
+    eval_output_dir: Path,
+) -> Path:
+    eval_output_dir.mkdir(parents=True, exist_ok=True)
+    annotator_dir = (eval_output_dir / f"alpaca_eval_{suite.eval.cfg.alpacaeval.backend}").resolve()
+    annotator_dir.mkdir(parents=True, exist_ok=True)
+
+    package_root = _alpaca_eval_package_root()
+    judge_model_name = resolve_judge_model_name(suite)
+
+    if suite.eval.cfg.alpacaeval.backend == "api":
+        prompt_template = (
+            package_root / "evaluators_configs" / "alpaca_eval_gpt4" / "alpaca_eval.txt"
+        )
+        annotator_name = "fdp_alpaca_eval_api"
+        annotator_cfg: Dict[str, Any] = {
+            annotator_name: {
+                "prompt_template": prompt_template.as_posix(),
+                "fn_completions": "openai_completions",
+                "completions_kwargs": {
+                    "model_name": judge_model_name,
+                    "max_tokens": suite.eval.cfg.alpacaeval.judge_max_tokens,
+                    "temperature": suite.eval.cfg.alpacaeval.temperature,
+                },
+                "fn_completion_parser": "ranking_parser",
+                "batch_size": suite.eval.cfg.alpacaeval.batch_size,
+            }
+        }
+    elif suite.eval.cfg.alpacaeval.backend == "vllm":
+        prompt_template = (
+            package_root
+            / "evaluators_configs"
+            / "alpaca_eval_vllm_llama3_70b_fn"
+            / "alpaca_eval_fn.txt"
+        )
+        annotator_name = "fdp_alpaca_eval_local_vllm"
+        model_kwargs = dict(suite.eval.cfg.alpacaeval.model_kwargs)
+        model_kwargs.setdefault("trust_remote_code", True)
+        _clear_stale_annotator_cache(annotator_dir)
+        annotator_cfg = {
+            annotator_name: {
+                "prompt_template": prompt_template.as_posix(),
+                "fn_completions": "vllm_local_completions",
+                "completions_kwargs": {
+                    "model_name": judge_model_name,
+                    "max_new_tokens": suite.eval.cfg.alpacaeval.judge_max_tokens,
+                    "is_chatml_prompt": True,
+                    "batch_size": suite.eval.cfg.alpacaeval.batch_size,
+                    "model_kwargs": model_kwargs,
+                    "temperature": suite.eval.cfg.alpacaeval.temperature,
+                    "top_p": suite.eval.cfg.alpacaeval.top_p,
+                },
+                "fn_completion_parser": "pipeline_meta_parser",
+                "completion_parser_kwargs": {
+                    "parsers_to_kwargs": {
+                        "strip_code_fences_parser": {},
+                        "ranking_parser": {},
+                    }
+                },
+                "batch_size": suite.eval.cfg.alpacaeval.batch_size,
+            }
+        }
+    else:
+        raise ValueError(
+            f"Unsupported judge_backend: {suite.eval.cfg.alpacaeval.backend!r}. Use 'api' or 'vllm'."
+        )
+
+    config_path = annotator_dir / "configs.yaml"
+    with open(config_path, "w") as f:
+        yaml.safe_dump(annotator_cfg, f, sort_keys=False)
+    return annotator_dir
+
+
+def _build_evaluate_from_model_cmd(
+    suite: SuiteConfig,
+    model_configs_dir: Path,
+    benchmark_path: Path,
+    annotators_config: Path,
+    eval_output_dir: Path,
+) -> list[str]:
+    cmd = [
+        "alpaca_eval",
+        "evaluate_from_model",
+        "--model_configs",
+        str((model_configs_dir / "configs.yaml").resolve()),
+        "--evaluation_dataset",
+        str(benchmark_path.resolve()),
+        "--annotators_config",
+        str(annotators_config.resolve()),
+        "--output_path",
+        str(eval_output_dir.resolve()),
+        "--is_strip_output",
+        "True",
+        "--is_load_outputs",
+        "True",
+        "--chunksize",
+        str(suite.eval.cfg.alpacaeval.batch_size),
+        "--base_dir",
+        str(model_configs_dir.resolve()),
+    ]
+
+    if suite.eval.cfg.alpacaeval.max_instances is not None:
+        cmd += ["--max_instances", str(suite.eval.cfg.alpacaeval.max_instances)]
+
+    return cmd
+
+
+def _run_evaluate_from_model_subprocess(
+    suite: SuiteConfig,
+    model_configs_dir: Path,
+    benchmark_path: Path,
+    annotators_config: Path,
+    eval_output_dir: Path,
+) -> None:
+    cmd = _build_evaluate_from_model_cmd(
+        suite=suite,
+        model_configs_dir=model_configs_dir,
+        benchmark_path=benchmark_path,
+        annotators_config=annotators_config,
+        eval_output_dir=eval_output_dir,
+    )
+    printable_cmd = " ".join(shlex.quote(part) for part in cmd)
+    print(f"Running AlpacaEval subprocess:\n{printable_cmd}")
+
+    try:
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError as exc:
+        fallback_cmd = [
+            "python",
+            "-m",
+            "alpaca_eval.main",
+            "evaluate_from_model",
+            *cmd[2:],
+        ]
+        printable_fallback = " ".join(shlex.quote(part) for part in fallback_cmd)
+        print(
+            "alpaca_eval command was not found on PATH. Falling back to python -m alpaca_eval.main:\n"
+            f"{printable_fallback}"
+        )
+        subprocess.run(fallback_cmd, check=True)
+    except subprocess.CalledProcessError:
+        raise RuntimeError("AlpacaEval subprocess failed. See the command output above for details.")
+
+
+def _remove_stale_model_outputs_cache(eval_output_dir: Path, expected_generator: str) -> None:
+    model_outputs_path = eval_output_dir / "model_outputs.json"
+    if not model_outputs_path.exists():
+        return
+
+    try:
+        with open(model_outputs_path, "r") as f:
+            cached_outputs = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        model_outputs_path.unlink(missing_ok=True)
+        return
+
+    if isinstance(cached_outputs, list) and cached_outputs:
+        current_generator = cached_outputs[0].get("generator")
+        if current_generator != expected_generator:
+            model_outputs_path.unlink(missing_ok=True)
+
+
+def _filter_alpaca_eval_summary(row: dict[str, Any]) -> dict[str, Any]:
+    important_keys = [
+        "length_controlled_winrate",
+        "win_rate",
+        "average_judge_score",
+        "n_total",
+        "n_wins",
+        "n_wins_base",
+        "n_draws",
+        "standard_error",
+        "judge_backend",
+        "judge_model_name",
+        "alpaca_eval_dataset",
+    ]
+    return {k: row[k] for k in important_keys if k in row}
+
+
+def _load_alpaca_eval_outputs(eval_output_dir: Path) -> tuple[dict[str, Any], Dict[str, Any]]:
+    leaderboard_path = eval_output_dir / "leaderboard.csv"
+    annotations_path = eval_output_dir / "annotation.json"
+
+    if not leaderboard_path.exists():
+        raise FileNotFoundError(
+            f"Expected AlpacaEval leaderboard at {leaderboard_path}, but it was not created."
+        )
+
+    leaderboard_df = pd.read_csv(leaderboard_path, index_col=0)
+    if leaderboard_df.empty:
+        raise ValueError(f"AlpacaEval leaderboard at {leaderboard_path} is empty.")
+
+    annotations: Dict[str, Any] | list[dict[str, Any]]
+    if annotations_path.exists():
+        with open(annotations_path, "r") as f:
+            annotations = json.load(f)
+    else:
+        annotations = []
+
+    leader_row = leaderboard_df.iloc[0].to_dict()
+    if "length_controlled_winrate" not in leader_row and "win_rate" in leader_row:
+        leader_row["length_controlled_winrate"] = leader_row["win_rate"]
+    leader_row["average_judge_score"] = float(
+        leader_row.get("length_controlled_winrate", leader_row.get("win_rate", 0.0))
+    )
+    return leader_row, {
+        "leaderboard": leaderboard_df.to_dict(orient="records"),
+        "annotations": annotations,
+    }
+
+
+def run_alpaca_eval_from_model(
+    suite: SuiteConfig,
+    model_path: str,
+    eval_output_dir: Path,
+    model_type: str | ModelType,
+    dataset_size: int | None = None,
+    topk: int | None = None,
+    ref_model_seed: int | None = None,
+) -> tuple[dict[str, Any], Dict[str, Any]]:
+    benchmark_path = resolve_eval_dataset_path(suite, eval_output_dir)
+    judge_model_name = resolve_judge_model_name(suite)
+
+    model_prompt_path = Path(__file__).resolve().parents[2] / "_alpaca_eval_prompt.txt"
+    if not model_prompt_path.exists():
+        model_prompt_path.write_text("{instruction}\n")
+
+    _, model_name, model_configs_dir = _resolve_model_config_identity(
+        suite=suite,
+        model_type=model_type,
+        dataset_size=dataset_size,
+        topk=topk,
+        ref_model_seed=ref_model_seed,
+    )
+
+    model_configs_dir = build_model_configs(
+        suite=suite,
+        model_name=model_name,
+        prompt_template_path=model_prompt_path,
+        model_path=model_path,
+        model_configs_dir=model_configs_dir,
+        use_vllm_local_completions=suite.eval.cfg.alpacaeval.backend == "vllm",
+    )
+    _remove_stale_model_outputs_cache(eval_output_dir=eval_output_dir, expected_generator=model_name)
+
+    annotators_config = build_annotators_config(suite=suite, eval_output_dir=eval_output_dir)
+    _run_evaluate_from_model_subprocess(
+        suite=suite,
+        model_configs_dir=model_configs_dir,
+        benchmark_path=benchmark_path,
+        annotators_config=annotators_config,
+        eval_output_dir=eval_output_dir,
+    )
+    leader_row, raw = _load_alpaca_eval_outputs(eval_output_dir)
+
+    leader_row["judge_backend"] = suite.eval.cfg.alpacaeval.backend
+    leader_row["judge_model_name"] = judge_model_name
+    leader_row["alpaca_eval_dataset"] = suite.eval.cfg.alpacaeval.dataset
+    return _filter_alpaca_eval_summary(leader_row), raw

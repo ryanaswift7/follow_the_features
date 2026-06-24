@@ -21,6 +21,7 @@ dependencies = [
     "immutabledict>=4.3.1",
     "faiss-cpu>=1.13.2",
     "vllm==0.19.1",
+    "alpaca-eval>=0.6.6",
 ]
 
 [tool.setuptools.packages.find]
@@ -36,7 +37,6 @@ explicit = true
 # torchaudio = { index = "pytorch-cu128" }
 
 [project.scripts]
-mvp = "mvp.main:main"
 fdp = "src.main:main"
 gen-ref-models = "src.reference_models:main"
 gen-sni-data = "src.utils.sni_data_gen:main"

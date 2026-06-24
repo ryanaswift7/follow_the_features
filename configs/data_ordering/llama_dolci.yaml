@@ -1,40 +1,52 @@
-title: "llama_dolci"
-output_dir: "experiments"
+title: llama_dolci
+output_dir: experiments
 seed: 3
-run_null_analysis: false
-num_null_trials: 10
 debug_mode: false
 prune:
   cfg:
-    prune_model_id: &prune_model "google/gemma-3-270m"
-    sae_release: "gemma-scope-2-270m-pt-res"
-    sae_id: "layer_9_width_65k_l0_medium"
-    dataset_id: "allenai/Dolci-Instruct-SFT-No-Tools"
-    num_samples: &samples 100000  # 1924533
-    seq_agg_method: "sum"  # possible values: "sum", "mean", "max"
-    feat_agg_method: "sum"  # possible values: "sum", "mean"
+    prune_model_id: google/gemma-3-270m
+    sae_release: gemma-scope-2-270m-pt-res
+    sae_id: layer_9_width_65k_l0_medium
+    dataset_id: allenai/Dolci-Instruct-SFT-No-Tools
+    num_samples: 100000
+    seq_agg_method: sum
+    feat_agg_method: sum
     divide_by_entropy: true
   params:
     batch_size: 2
-    dataset_sizes: [20000]  # [1924533]
-    topk_features: [5]
+    dataset_sizes:
+    - 20000
+    topk_features:
+    - 5
 sft:
   cfg:
     tokenizer_id: meta-llama/Llama-3.1-8B-Instruct
     base_model_id: meta-llama/Llama-3.1-8B
     max_seq_length: 2048
     learning_rate: 0.0002
-    max_original_samples: *samples
+    max_original_samples: 100000
   params:
     batch_size: 2
 eval:
   cfg:
-    num_samples: 300
-    max_new_tokens: 256
-    ollama_judge: "llama3.3:70b"
-    num_ref_models: 1  # 3
-    tasks: null
-      # - leaderboard
-    task_limit: null
+    num_ref_models: 1
+    lm_eval:
+      run: true
+      max_new_tokens: 256
+      tasks: null
+      task_limit: null
+    alpacaeval:
+      run: true
+      backend: vllm
+      model_name: llama3.3:70b
+      dataset: alpaca_eval_gpt4_baseline
+      max_instances: 300
+      max_new_tokens: 256
+      judge_max_tokens: 100
+      temperature: 0.0
+      top_p: 1.0
+      batch_size: 1
+      model_kwargs: {}
+      client_kwargs: {}
   params:
-    batch_size: 8  # 32
+    batch_size: 8

@@ -1,0 +1,61 @@
+title: big_pruner
+output_dir: experiments
+seed: 3
+debug_mode: false
+prune:
+  cfg:
+    prune_model_id: google/gemma-3-27b-it
+    sae_release: gemma-scope-2-27b-it-res
+    sae_id: layer_31_width_65k_l0_medium
+    dataset_id: yahma/alpaca-cleaned
+    num_samples: 51760
+    seq_agg_method: sum
+    feat_agg_method: sum
+    divide_by_entropy: true
+  params:
+    batch_size: 8
+    dataset_sizes:
+    - 500
+    - 5000
+    - 10000
+    - 51760
+    topk_features:
+    - 1
+    - 5
+    - 10
+    - 50
+    - 100
+    - 150
+    - 200
+sft:
+  cfg:
+    tokenizer_id: google/gemma-3-27b-it
+    base_model_id: google/gemma-3-1b-pt
+    max_seq_length: 4750
+    learning_rate: 0.0002
+    max_original_samples: 51760
+  params:
+    batch_size: 2
+eval:
+  cfg:
+    num_ref_models: 3
+    lm_eval:
+      run: true
+      max_new_tokens: 256
+      tasks: null
+      task_limit: null
+    alpacaeval:
+      run: true
+      backend: vllm
+      model_name: llama3.3:70b
+      dataset: alpaca_eval_gpt4_baseline
+      max_instances: 300
+      max_new_tokens: 256
+      judge_max_tokens: 100
+      temperature: 0.0
+      top_p: 1.0
+      batch_size: 1
+      model_kwargs: {}
+      client_kwargs: {}
+  params:
+    batch_size: 32

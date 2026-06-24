@@ -1,0 +1,11 @@
+fdp_reference_seed_3_google_gemma-3-1b-pt:
+  prompt_template: prompt.txt
+  fn_completions: vllm_local_completions
+  completions_kwargs:
+    model_name: debugging/models/reference_models/gemma-3-1b-pt/seed_3
+    max_new_tokens: 2
+    temperature: 0.0
+    top_p: 1.0
+    batch_size: 1
+    model_kwargs:
+      trust_remote_code: true

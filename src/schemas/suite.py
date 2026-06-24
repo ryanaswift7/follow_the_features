@@ -16,8 +16,6 @@ class SuiteConfig(BaseModel):
     title: str
     output_dir: Path
     seed: int
-    run_null_analysis: bool
-    num_null_trials: int
     debug_mode: bool = False
 
     prune: PruneSetup

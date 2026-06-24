@@ -57,10 +57,6 @@ class SuiteDirs(BaseModel):
     def sota_results(self) -> Path:
         return self.ensure_dir(self._results_root / "sota")
 
-    @computed_field
-    @property
-    def null_dist_results(self) -> Path:
-        return self.ensure_dir(self._results_root / "null_dist")
 
     @computed_field
     @property
@@ -81,8 +77,14 @@ class SuiteDirs(BaseModel):
 
     @computed_field
     @property
-    def reference_model_eval(self) -> Path:
-        return self.ensure_dir(self.reference_model_root / self.ids.eval)
+    def reference_model_summary_root(self) -> Path:
+        return self.ensure_dir(self.reference_model_root / "summary")
+
+    @computed_field
+    @property
+    def reference_model_summary_eval(self) -> Path:
+        # Aggregate reference-model summary results live in a nested eval dir.
+        return self.ensure_dir(self.reference_model_summary_root / self.ids.eval)
     
     # --- STANDARD METHODS (Take arguments, NOT properties) ---
     
@@ -116,6 +118,21 @@ class SuiteDirs(BaseModel):
         return self.ensure_dir(
             self.get_ref_model_root_by_seed(seed)
             / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
+        )
+
+    def get_base_model_alpaca_eval_model_configs_dir(self) -> Path:
+        return self.ensure_dir(self.base_model_root / "alpaca_eval_model_configs")
+
+    def get_ref_model_alpaca_eval_model_configs_dir_by_seed(self, seed: int) -> Path:
+        return self.ensure_dir(
+            self.get_ref_model_root_by_seed(seed)
+            / "alpaca_eval_model_configs"
+        )
+
+    def get_trained_model_alpaca_eval_model_configs_dir(self, dataset_size: int, topk: int) -> Path:
+        return self.ensure_dir(
+            self.get_trained_model_root(dataset_size, topk)
+            / "alpaca_eval_model_configs"
         )
 
     def get_dataset_path(self, dataset_size: int, topk: int) -> Path:

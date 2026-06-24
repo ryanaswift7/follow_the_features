@@ -348,7 +348,7 @@ def get_top_sample_indices(
     layer_idx,
     feature_indices,
     n_samples,
-    sequence_aggregation: Literal["sum", "mean", "max"],
+    sequence_aggregation: Literal["sum", "mean", "max", "last_token"],
     feature_aggregation: Literal["sum", "mean"],
     device="cuda",
     chunk_size: int = 256,  # <-- Added chunk size parameter
@@ -420,8 +420,10 @@ def get_top_sample_indices(
                 seq_scores = relevant_acts.mean(dim=1)
             elif sequence_aggregation == "max":
                 seq_scores = relevant_acts.max(dim=1).values
+            elif sequence_aggregation == "last_token":
+                seq_scores = relevant_acts[:, -1, :]
             else:
-                raise ValueError("sequence_aggregation must be 'sum', 'mean', or 'max'")
+                raise ValueError("sequence_aggregation must be 'sum', 'mean', 'max', or 'last_token'")
 
             # 5. Feature Aggregation
             if feature_aggregation == "sum":

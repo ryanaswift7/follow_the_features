@@ -1,0 +1,54 @@
+title: llama2_662
+output_dir: /scratch1/ryanswif/fdp/experiments
+seed: 3
+debug_mode: false
+prune:
+  cfg:
+    prune_model_id: google/gemma-3-270m-it
+    sae_release: gemma-scope-2-270m-it-res
+    sae_id: layer_9_width_65k_l0_medium
+    dataset_id: yahma/alpaca-cleaned
+    num_samples: 51760
+    seq_agg_method: sum
+    feat_agg_method: sum
+    divide_by_entropy: true
+  params:
+    batch_size: 12
+    dataset_sizes:
+    - 10000
+    topk_features:
+    - 5
+sft:
+  cfg:
+    tokenizer_id: meta-llama/Llama-2-13b-chat-hf
+    base_model_id: meta-llama/Llama-2-13b-hf
+    max_seq_length: 2048
+    learning_rate: 0.0002
+    max_original_samples: 51760
+    full_ft: false
+  params:
+    batch_size: 24
+eval:
+  cfg:
+    num_ref_models: 1
+    lm_eval:
+      run: true
+      max_new_tokens: 1024
+      tasks:
+      - leaderboard
+      task_limit: null
+    alpacaeval:
+      run: true
+      backend: vllm
+      model_name: llama3.3:70b
+      dataset: alpaca_eval_gpt4_baseline
+      max_instances: 300
+      max_new_tokens: 1024
+      judge_max_tokens: 100
+      temperature: 0.0
+      top_p: 1.0
+      batch_size: 1
+      model_kwargs: {}
+      client_kwargs: {}
+  params:
+    batch_size: 12

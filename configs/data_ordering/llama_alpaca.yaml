@@ -1,55 +1,53 @@
-title: "llama_alpaca"
-output_dir: "data-ordering"
+title: llama_alpaca
+output_dir: data-ordering
 seed: 3
-run_null_analysis: false
-num_null_trials: 10
 debug_mode: false
 prune:
   cfg:
-    prune_model_id: &prune_model "google/gemma-3-270m"
-    sae_release: "gemma-scope-2-270m-pt-res"
-    sae_id: "layer_9_width_65k_l0_medium"
-    dataset_id: "yahma/alpaca-cleaned"
-    num_samples: &samples 51760
-    seq_agg_method: "sum"  # possible values: "sum", "mean", "max"
-    feat_agg_method: "sum"  # possible values: "sum", "mean"
+    prune_model_id: google/gemma-3-270m
+    sae_release: gemma-scope-2-270m-pt-res
+    sae_id: layer_9_width_65k_l0_medium
+    dataset_id: yahma/alpaca-cleaned
+    num_samples: 51760
+    seq_agg_method: sum
+    feat_agg_method: sum
     divide_by_entropy: true
   params:
     batch_size: 12
-    dataset_sizes: [51760]
-    topk_features: [5]
+    dataset_sizes:
+    - 51760
+    topk_features:
+    - 5
 sft:
   cfg:
     tokenizer_id: meta-llama/Llama-3.1-8B-Instruct
     base_model_id: meta-llama/Llama-3.1-8B
     max_seq_length: 1024
     learning_rate: 0.0002
-    max_original_samples: *samples
+    max_original_samples: 51760
   params:
     batch_size: 2
 eval:
   cfg:
-    num_samples: 300
-    max_new_tokens: 256
-    # ollama_judge: "llama3.3:70b"
-    ollama_judge: "gemma3:27b-it-qat"
     num_ref_models: 3
-    tasks:
+    lm_eval:
+      run: true
+      max_new_tokens: 256
+      tasks:
       - leaderboard
-    task_limit: null
-
-    #==== FOR FUTURE REVISION ============
-    # num_ref_models: 3
-    # custom_judge:
-    #   num_samples: 300
-    #   max_new_tokens: 256
-    #   ollama_judge: "llama3.3:70b"
-    # lm_eval: 
-    #   tasks:
-    #     - leaderboard
-    #   task_limit: null
-    # alpacaeval:
-    #   num_samples: 300
-    #   judge: 'local'  # or 'gpt4'
+      task_limit: null
+    alpacaeval:
+      run: true
+      backend: vllm
+      model_name: gemma3:27b-it-qat
+      dataset: alpaca_eval_gpt4_baseline
+      max_instances: 300
+      max_new_tokens: 256
+      judge_max_tokens: 100
+      temperature: 0.0
+      top_p: 1.0
+      batch_size: 1
+      model_kwargs: {}
+      client_kwargs: {}
   params:
-    batch_size: 2  # 32
+    batch_size: 2

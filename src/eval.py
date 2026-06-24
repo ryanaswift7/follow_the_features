@@ -67,7 +67,7 @@ def run_eval(
     gen_cache_dir = suite.dirs.get_trained_model_gen_cache(
         dataset_size=dataset_size,
         topk=topk,
-        max_new_tokens=suite.eval.cfg.max_new_tokens,
+        max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens,
     )
     print(f"Loading Adapter: {adapter_path}")
     # model = AutoModelForCausalLM.from_pretrained(adapter_path, device_map="auto",  dtype=torch.bfloat16)
@@ -92,7 +92,12 @@ def run_eval(
 
 
 def verify_or_run_baseline(
-    model_id: str, model_type: ModelType, eval_dir: Path, suite: SuiteConfig
+    model_id: str,
+    model_type: ModelType,
+    eval_dir: Path,
+    suite: SuiteConfig,
+    run_lm_eval: bool,
+    run_judge_eval: bool,
 ) -> None:
     """
     Checks for existing valid evaluations or runs a new one.
@@ -102,6 +107,12 @@ def verify_or_run_baseline(
     valid = False
     row = None
 
+    expected_sections = []
+    if run_lm_eval:
+        expected_sections.append("lm_eval_results")
+    if run_judge_eval:
+        expected_sections.append("reference_results")
+
     # 1. Validate existing config/results
     if os.path.exists(cfg_path) and os.path.exists(results_path):
         try:
@@ -110,37 +121,27 @@ def verify_or_run_baseline(
             with open(results_path, "r") as f:
                 res_data = json.load(f)
 
-            # Check if IDs match
-            if cfg_data.get(EVAL_ID_KEY) == suite.ids.eval:
+            if cfg_data.get(EVAL_ID_KEY) == suite.ids.eval and all(
+                isinstance(res_data, dict) and res_data.get(section) is not None
+                for section in expected_sections
+            ):
                 valid = True
-                # Unwrap results if needed
-                row = (
-                    res_data.get(EVAL_RESULTS_KEY, res_data)
-                    if isinstance(res_data, dict)
-                    else res_data
-                )
+                row = res_data
         except (json.JSONDecodeError, IOError) as e:
             print(
                 f"[BASELINE] Warning: Error reading {model_type.name} cache in {eval_dir}: {e}"
             )
 
-    # 2. Return cached if valid
     if valid and row is not None:
         print(
             f"[BASELINE] {model_type.name} eval already exists and matches eval_id, skipping."
         )
         return
 
-    # 3. Otherwise, Run Eval
     print(f"Evaluating {model_type.name} model ({model_id})...")
 
     if model_type == ModelType.BASE:
         model, tokenizer = load_model_and_tokenizer(model_id=model_id, tokenizer_id=suite.sft.cfg.tokenizer_id, is_inference=True)
-        # tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id)
-        # model = AutoModelForCausalLM.from_pretrained(
-        #     model_id, device_map="auto", torch_dtype=torch.bfloat16
-        # )
-        # model, tokenizer = ensure_pad_token(model=model, tokenizer=tokenizer)
 
         eval_and_save(
             model=model,
@@ -150,16 +151,19 @@ def verify_or_run_baseline(
             dataset_size=None,
             topk=None,
             gen_cache_dir=suite.dirs.get_base_model_gen_cache(
-                max_new_tokens=suite.eval.cfg.max_new_tokens),
+                max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens),
         )
 
-        # 4. Cleanup
         del model, tokenizer
         gc.collect()
         torch.cuda.empty_cache()
 
     else:
-        generate_reference_models(suite=suite)
+        generate_reference_models(
+            suite=suite,
+            run_lm_eval=run_lm_eval,
+            run_judge_eval=run_judge_eval,
+        )
 
     return
 
@@ -168,17 +172,29 @@ def run_baseline_evals(suite: SuiteConfig):
     """
     Run and save baseline (base and reference) model evaluations.
     """
-    # must run ref models first so that they are initialized for base model judge scores
-    verify_or_run_baseline(
-        model_id=suite.sft.cfg.base_model_id,
-        model_type=ModelType.REFERENCE,
-        eval_dir=suite.dirs.reference_model_eval,
-        suite=suite,
-    )
+    run_lm_eval = suite.eval.cfg.lm_eval.run
+    run_judge_eval = suite.eval.cfg.alpacaeval.run
+
+    if not (run_lm_eval or run_judge_eval):
+        print("[BASELINE] Both LM eval and judge eval are disabled. Skipping baselines.")
+        return
+
+    if run_lm_eval or run_judge_eval:
+        verify_or_run_baseline(
+            model_id=suite.sft.cfg.base_model_id,
+            model_type=ModelType.REFERENCE,
+            eval_dir=suite.dirs.reference_model_summary_eval,
+            suite=suite,
+            run_lm_eval=run_lm_eval,
+            run_judge_eval=run_judge_eval,
+        )
+
     verify_or_run_baseline(
         model_id=suite.sft.cfg.base_model_id,
         model_type=ModelType.BASE,
         eval_dir=suite.dirs.base_model_eval,
         suite=suite,
+        run_lm_eval=run_lm_eval,
+        run_judge_eval=run_judge_eval,
     )
     return

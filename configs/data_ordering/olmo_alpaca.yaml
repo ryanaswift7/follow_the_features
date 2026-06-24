@@ -1,40 +1,53 @@
-title: "olmo_alpaca"
-output_dir: "experiments"
+title: olmo_alpaca
+output_dir: experiments
 seed: 3
-run_null_analysis: false
-num_null_trials: 10
 debug_mode: false
 prune:
   cfg:
-    prune_model_id: &prune_model "google/gemma-3-270m-it"
-    sae_release: "gemma-scope-2-270m-it-res"
-    sae_id: "layer_9_width_65k_l0_medium"
-    dataset_id: "yahma/alpaca-cleaned"
-    num_samples: &samples 51760
-    seq_agg_method: "max"  # possible values: "sum", "mean", "max"
-    feat_agg_method: "mean"  # possible values: "sum", "mean"
+    prune_model_id: google/gemma-3-270m-it
+    sae_release: gemma-scope-2-270m-it-res
+    sae_id: layer_9_width_65k_l0_medium
+    dataset_id: yahma/alpaca-cleaned
+    num_samples: 51760
+    seq_agg_method: max
+    feat_agg_method: mean
     divide_by_entropy: true
   params:
     batch_size: 12
-    dataset_sizes: [51760]
-    topk_features: [50]
+    dataset_sizes:
+    - 51760
+    topk_features:
+    - 50
 sft:
   cfg:
     tokenizer_id: allenai/Olmo-3-7B-Instruct-SFT
     base_model_id: allenai/Olmo-3-1025-7B
-    max_seq_length: 2048  # 4750
+    max_seq_length: 2048
     learning_rate: 0.0002
-    max_original_samples: *samples
+    max_original_samples: 51760
   params:
     batch_size: 2
 eval:
   cfg:
-    num_samples: 300
-    max_new_tokens: 1024
-    ollama_judge: "llama3.3:70b"
     num_ref_models: 3
-    tasks:
+    lm_eval:
+      run: true
+      max_new_tokens: 1024
+      tasks:
       - leaderboard
-    task_limit: null
+      task_limit: null
+    alpacaeval:
+      run: true
+      backend: vllm
+      model_name: llama3.3:70b
+      dataset: alpaca_eval_gpt4_baseline
+      max_instances: 300
+      max_new_tokens: 1024
+      judge_max_tokens: 100
+      temperature: 0.0
+      top_p: 1.0
+      batch_size: 1
+      model_kwargs: {}
+      client_kwargs: {}
   params:
-    batch_size: 8  # 32
+    batch_size: 8
