@@ -1,6 +1,6 @@
-title: base_full_gemma3
-output_dir: experiments
-seed: 3
+title: do_base_full_gemma3_diversity
+output_dir: fdp_experiments
+seed: 67
 debug_mode: false
 prune:
   cfg:
@@ -9,9 +9,10 @@ prune:
     sae_id: layer_9_width_65k_l0_medium
     dataset_id: yahma/alpaca-cleaned
     num_samples: 51760
-    seq_agg_method: sum
-    feat_agg_method: sum
+    seq_agg_method: last_token
+    feat_agg_method: mean
     divide_by_entropy: true
+    diversity_param: 0.2
   params:
     batch_size: 8
     dataset_sizes:
@@ -34,7 +35,7 @@ sft:
   cfg:
     tokenizer_id: google/gemma-3-270m-it
     base_model_id: google/gemma-3-1b-pt
-    max_seq_length: 4750
+    max_seq_length: 256
     learning_rate: 0.0002
     max_original_samples: 51760
   params:
@@ -45,7 +46,8 @@ eval:
     lm_eval:
       run: true
       max_new_tokens: 256
-      tasks: null
+      tasks:
+      - leaderboard
       task_limit: null
     alpacaeval:
       run: true
@@ -57,7 +59,6 @@ eval:
       judge_max_tokens: 100
       temperature: 0.0
       top_p: 1.0
-      batch_size: 4
       model_kwargs:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.9

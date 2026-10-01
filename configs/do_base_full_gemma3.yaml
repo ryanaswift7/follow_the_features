@@ -1,0 +1,76 @@
+title: do_base_full_gemma3
+output_dir: do_experiments
+seed: 67
+debug_mode: false
+prune:
+  cfg:
+    prune_model_id: google/gemma-3-270m-it
+    sae_release: gemma-scope-2-270m-it-res
+    sae_id: layer_9_width_65k_l0_medium
+    dataset_id: yahma/alpaca-cleaned
+    num_samples: 51760
+    seq_agg_method: last_token
+    feat_agg_method: mean
+    divide_by_entropy: true
+    diversity_param: null
+  params:
+    batch_size: 8
+    dataset_sizes:
+    - 51760
+    topk_features:
+    - 1
+    - 5
+    - 10
+    - 50
+    - 100
+    - 150
+    - 200
+sft:
+  cfg:
+    tokenizer_id: google/gemma-3-270m-it
+    base_model_id: google/gemma-3-1b-pt
+    max_seq_length: 256
+    learning_rate: 0.0002
+    max_original_samples: 51760
+  params:
+    batch_size: 2
+eval:
+  cfg:
+    num_ref_models: 3
+    lm_eval:
+      run: true
+      max_new_tokens: 256
+      tasks:
+      - leaderboard
+      task_limit: null
+    alpacaeval:
+      run: true
+      backend: api
+      model_name: gpt-5.4-nano
+      dataset: alpaca_eval_gpt4_baseline
+      max_instances: 300
+      max_new_tokens: 256
+      judge_max_tokens: 100
+      temperature: 0.0
+      top_p: 1.0
+      local_server_host: 127.0.0.1
+      local_server_port: null
+      model_kwargs: {}
+      client_kwargs: {}
+    # alpacaeval:
+    #   run: true
+    #   backend: vllm
+    #   model_name: meta-llama/Meta-Llama-3.1-8B-Instruct
+    #   dataset: alpaca_eval_gpt4_baseline
+    #   max_instances: 300
+    #   max_new_tokens: 256
+    #   judge_max_tokens: 256
+    #   temperature: 0.0
+    #   top_p: 1.0
+    #   batch_size: 4
+    #   model_kwargs:
+    #     tensor_parallel_size: 1
+    #     gpu_memory_utilization: 0.9
+    #   client_kwargs: {}
+  params:
+    batch_size: 4

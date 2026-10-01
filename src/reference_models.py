@@ -136,20 +136,24 @@ def generate_reference_models(
     if models_to_train:
         print(f"[REF MODELS] Loading dataset: {dataset_id}...")
         if "ultrachat" in dataset_id:
-            full_ds = load_dataset(dataset_id, split="train_sft")
+            raw_full_ds = load_dataset(dataset_id, split="train_sft")
         else:
-            full_ds = load_dataset(dataset_id, split="train")
+            raw_full_ds = load_dataset(dataset_id, split="train")
 
         if suite.debug_mode:
-            full_ds = full_ds.select(range(1))
+            raw_full_ds = raw_full_ds.select(range(1))
 
-        if suite.prune.cfg.num_samples is not None and suite.prune.cfg.num_samples < len(full_ds):
-            full_ds = full_ds.select(range(suite.prune.cfg.num_samples))
+        if suite.prune.cfg.num_samples is not None and suite.prune.cfg.num_samples < len(raw_full_ds):
+            raw_full_ds = raw_full_ds.select(range(suite.prune.cfg.num_samples))
 
-        full_ds_len = len(full_ds)
+        full_ds_len = len(raw_full_ds)
+        if full_ds_len == 0:
+            raise ValueError(
+                f"Reference model training dataset is empty after applying debug/num_samples filters for {dataset_id}."
+            )
     else:
         print("[REF MODELS] All individual reference models already have valid cached results.")
-        full_ds = None
+        raw_full_ds = None
         full_ds_len = None
 
     all_lm_scores: list[dict[str, Any]] = []
@@ -211,14 +215,14 @@ def generate_reference_models(
 
             print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
             formatter_func = get_formatting_function(dataset_id)
-            full_ds = full_ds.map(
+            dataset = raw_full_ds.map(
                 lambda examples: formatter_func(tokenizer, examples, is_inference=False),
                 batched=True,
                 batch_size=batch_size,
                 desc="Tokenizing Data",
-                remove_columns=full_ds.column_names,
+                remove_columns=raw_full_ds.column_names,
             )
-            dataset = full_ds.shuffle(seed=trial_seed)
+            dataset = dataset.shuffle(seed=trial_seed)
 
             trainer_args = generate_sft_trainer_args(
                 suite=suite,

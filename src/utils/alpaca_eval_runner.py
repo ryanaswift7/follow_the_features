@@ -60,13 +60,14 @@ def _resolve_model_config_identity(
     elif kind == "adapter":
         if dataset_size is None or topk is None:
             raise ValueError("dataset_size and topk must be provided for adapter AlpacaEval configs.")
-        model_key = f"fdp_adapter_ds{dataset_size}_topk{topk}_{base_model_slug}"
+        diversity_tag = getattr(suite.prune.cfg, "diversity_tag", "divoff")
+        model_key = f"fdp_adapter_ds{dataset_size}_topk{topk}_{diversity_tag}_{base_model_slug}"
         model_dir = (
             _model_configs_root()
             / "trained_models"
             / suite.ids.prune
             / suite.ids.sft
-            / f"ds{dataset_size}_topk{topk}_{base_model_slug}"
+            / f"ds{dataset_size}_topk{topk}_{diversity_tag}_{base_model_slug}"
         )
     else:
         raise ValueError(f"Unsupported model_type: {model_type!r}")
@@ -83,7 +84,11 @@ def resolve_judge_model_name(suite: SuiteConfig) -> str:
     return model_name
 
 
-def resolve_eval_dataset_path(suite: SuiteConfig, eval_output_dir: Path) -> Path:
+def resolve_eval_dataset_path(
+    suite: SuiteConfig,
+    eval_output_dir: Path,
+    max_instances: int | None = None,
+) -> Path:
     dataset_name = suite.eval.cfg.alpacaeval.dataset
     if dataset_name not in {"alpaca_eval", "alpaca_eval_gpt4_baseline"}:
         raise ValueError(
@@ -99,10 +104,14 @@ def resolve_eval_dataset_path(suite: SuiteConfig, eval_output_dir: Path) -> Path
         )
     )
 
-    local_dataset_path = (eval_output_dir / "alpaca_eval_dataset.json").resolve()
+    suffix = f"_max{max_instances}" if max_instances is not None else ""
+    local_dataset_path = (eval_output_dir / f"alpaca_eval_dataset{suffix}.json").resolve()
     local_dataset_path.parent.mkdir(parents=True, exist_ok=True)
     if not local_dataset_path.exists():
-        shutil.copyfile(cache_path, local_dataset_path)
+        df_dataset = pd.read_json(cache_path)
+        if max_instances is not None:
+            df_dataset = df_dataset.iloc[:max_instances].copy()
+        df_dataset.to_json(local_dataset_path, orient="records", indent=2)
     return local_dataset_path
 
 
@@ -236,21 +245,20 @@ def build_model_configs(
     config_path = model_dir / "configs.yaml"
     prompt_path = model_dir / "prompt.txt"
 
-    if not prompt_path.exists():
-        prompt_path.write_text(prompt_template_path.read_text())
-
-    if config_path.exists():
-        return model_dir
+    prompt_contents = prompt_template_path.read_text()
+    if not prompt_path.exists() or prompt_path.read_text() != prompt_contents:
+        prompt_path.write_text(prompt_contents)
 
     fn_completions = (
         "vllm_local_completions" if use_vllm_local_completions else "huggingface_local_completions"
     )
-    completions_kwargs: Dict[str, Any] = {
+    completions_kwargs = {
         "model_name": model_path,
         "max_new_tokens": suite.eval.cfg.alpacaeval.max_new_tokens,
         "temperature": 0.0,
         "top_p": suite.eval.cfg.alpacaeval.top_p,
-        "batch_size": max(1, suite.eval.cfg.alpacaeval.batch_size),
+        # AlpacaEval batches prompts at the template layer; our generation prompt is single-example.
+        "batch_size": 1,
     }
     if use_vllm_local_completions:
         completions_kwargs["model_kwargs"] = {
@@ -270,8 +278,9 @@ def build_model_configs(
         }
     }
 
-    with open(config_path, "w") as f:
-        yaml.safe_dump(model_cfg, f, sort_keys=False)
+    desired_config = yaml.safe_dump(model_cfg, sort_keys=False)
+    if not config_path.exists() or config_path.read_text() != desired_config:
+        config_path.write_text(desired_config)
     return model_dir
 
 
@@ -310,11 +319,11 @@ def build_annotators_config(
                 "fn_completions": "openai_completions",
                 "completions_kwargs": {
                     "model_name": judge_model_name,
-                    "max_tokens": suite.eval.cfg.alpacaeval.judge_max_tokens,
+                    "max_completion_tokens": suite.eval.cfg.alpacaeval.judge_max_tokens,
                     "temperature": suite.eval.cfg.alpacaeval.temperature,
                 },
                 "fn_completion_parser": "ranking_parser",
-                "batch_size": suite.eval.cfg.alpacaeval.batch_size,
+                "batch_size": 1,
             }
         }
     elif suite.eval.cfg.alpacaeval.backend == "vllm":
@@ -336,7 +345,8 @@ def build_annotators_config(
                     "model_name": judge_model_name,
                     "max_new_tokens": suite.eval.cfg.alpacaeval.judge_max_tokens,
                     "is_chatml_prompt": True,
-                    "batch_size": suite.eval.cfg.alpacaeval.batch_size,
+                    # Keep the local judge batch size small so vLLM does not over-reserve KV cache.
+                    "batch_size": 1,
                     "model_kwargs": model_kwargs,
                     "temperature": suite.eval.cfg.alpacaeval.temperature,
                     "top_p": suite.eval.cfg.alpacaeval.top_p,
@@ -348,7 +358,9 @@ def build_annotators_config(
                         "ranking_parser": {},
                     }
                 },
-                "batch_size": suite.eval.cfg.alpacaeval.batch_size,
+                # AlpacaEval's judge prompt template is single-example; batching here
+                # would require a template with repeated placeholders.
+                "batch_size": 1,
             }
         }
     else:
@@ -385,7 +397,7 @@ def _build_evaluate_from_model_cmd(
         "--is_load_outputs",
         "True",
         "--chunksize",
-        str(suite.eval.cfg.alpacaeval.batch_size),
+        str(suite.eval.params.batch_size),
         "--base_dir",
         str(model_configs_dir.resolve()),
     ]
@@ -411,7 +423,11 @@ def _run_evaluate_from_model_subprocess(
         eval_output_dir=eval_output_dir,
     )
     printable_cmd = " ".join(shlex.quote(part) for part in cmd)
-    print(f"Running AlpacaEval subprocess:\n{printable_cmd}")
+    max_instances = suite.eval.cfg.alpacaeval.max_instances
+    print(
+        "Running AlpacaEval subprocess "
+        f"(max_instances={max_instances}, dataset_path={benchmark_path.resolve()}):\n{printable_cmd}"
+    )
 
     try:
         subprocess.run(cmd, check=True)
@@ -433,7 +449,11 @@ def _run_evaluate_from_model_subprocess(
         raise RuntimeError("AlpacaEval subprocess failed. See the command output above for details.")
 
 
-def _remove_stale_model_outputs_cache(eval_output_dir: Path, expected_generator: str) -> None:
+def _remove_stale_model_outputs_cache(
+    eval_output_dir: Path,
+    expected_generator: str,
+    expected_max_instances: int | None = None,
+) -> None:
     model_outputs_path = eval_output_dir / "model_outputs.json"
     if not model_outputs_path.exists():
         return
@@ -445,10 +465,24 @@ def _remove_stale_model_outputs_cache(eval_output_dir: Path, expected_generator:
         model_outputs_path.unlink(missing_ok=True)
         return
 
-    if isinstance(cached_outputs, list) and cached_outputs:
-        current_generator = cached_outputs[0].get("generator")
-        if current_generator != expected_generator:
+    if isinstance(cached_outputs, list):
+        if expected_max_instances is not None and len(cached_outputs) != expected_max_instances:
             model_outputs_path.unlink(missing_ok=True)
+            return
+        if cached_outputs:
+            current_generator = cached_outputs[0].get("generator")
+            if current_generator != expected_generator:
+                model_outputs_path.unlink(missing_ok=True)
+
+
+def _clear_stale_eval_artifacts(eval_output_dir: Path) -> None:
+    for filename in (
+        "model_outputs.json",
+        "reference_outputs.json",
+        "leaderboard.csv",
+        "annotations.json",
+    ):
+        (eval_output_dir / filename).unlink(missing_ok=True)
 
 
 def _filter_alpaca_eval_summary(row: dict[str, Any]) -> dict[str, Any]:
@@ -509,7 +543,11 @@ def run_alpaca_eval_from_model(
     topk: int | None = None,
     ref_model_seed: int | None = None,
 ) -> tuple[dict[str, Any], Dict[str, Any]]:
-    benchmark_path = resolve_eval_dataset_path(suite, eval_output_dir)
+    benchmark_path = resolve_eval_dataset_path(
+        suite,
+        eval_output_dir,
+        max_instances=suite.eval.cfg.alpacaeval.max_instances,
+    )
     judge_model_name = resolve_judge_model_name(suite)
 
     model_prompt_path = Path(__file__).resolve().parents[2] / "_alpaca_eval_prompt.txt"
@@ -524,6 +562,10 @@ def run_alpaca_eval_from_model(
         ref_model_seed=ref_model_seed,
     )
 
+    print("\n" + "=" * 60)
+    print("PHASE 4A: Generating model outputs with AlpacaEval evaluate_from_model...")
+    print("=" * 60)
+
     model_configs_dir = build_model_configs(
         suite=suite,
         model_name=model_name,
@@ -532,16 +574,46 @@ def run_alpaca_eval_from_model(
         model_configs_dir=model_configs_dir,
         use_vllm_local_completions=suite.eval.cfg.alpacaeval.backend == "vllm",
     )
-    _remove_stale_model_outputs_cache(eval_output_dir=eval_output_dir, expected_generator=model_name)
+    if suite.eval.cfg.alpacaeval.max_instances is not None:
+        _clear_stale_eval_artifacts(eval_output_dir=eval_output_dir)
+    _remove_stale_model_outputs_cache(
+        eval_output_dir=eval_output_dir,
+        expected_generator=model_name,
+        expected_max_instances=suite.eval.cfg.alpacaeval.max_instances,
+    )
+
+    print("\n" + "=" * 60)
+    print("PHASE 4B: Building AlpacaEval judge config and scoring outputs...")
+    print("=" * 60)
 
     annotators_config = build_annotators_config(suite=suite, eval_output_dir=eval_output_dir)
-    _run_evaluate_from_model_subprocess(
-        suite=suite,
-        model_configs_dir=model_configs_dir,
-        benchmark_path=benchmark_path,
-        annotators_config=annotators_config,
-        eval_output_dir=eval_output_dir,
-    )
+    if suite.eval.cfg.alpacaeval.backend == "api":
+        import alpaca_eval.main as alpaca_eval_main
+
+        max_instances = suite.eval.cfg.alpacaeval.max_instances
+        print(
+            "Running AlpacaEval directly in-process for api backend "
+            f"(max_instances={max_instances}, dataset_path={benchmark_path.resolve()})"
+        )
+        alpaca_eval_main.evaluate_from_model(
+            model_configs=(model_configs_dir / "configs.yaml").resolve(),
+            evaluation_dataset=benchmark_path.resolve(),
+            annotators_config=annotators_config.resolve(),
+            output_path=eval_output_dir.resolve(),
+            max_instances=max_instances,
+            is_strip_output=True,
+            is_load_outputs=True,
+            chunksize=None,
+            base_dir=str(model_configs_dir.resolve()),
+        )
+    else:
+        _run_evaluate_from_model_subprocess(
+            suite=suite,
+            model_configs_dir=model_configs_dir,
+            benchmark_path=benchmark_path,
+            annotators_config=annotators_config,
+            eval_output_dir=eval_output_dir,
+        )
     leader_row, raw = _load_alpaca_eval_outputs(eval_output_dir)
 
     leader_row["judge_backend"] = suite.eval.cfg.alpacaeval.backend

@@ -12,12 +12,13 @@ prune:
     seq_agg_method: last_token
     feat_agg_method: mean
     divide_by_entropy: true
+    diversity_param: 0.2
   params:
     batch_size: 2
     dataset_sizes:
     - 2
     topk_features:
-    - 1
+    - 10
 sft:
   cfg:
     tokenizer_id: google/gemma-3-270m-it
@@ -46,7 +47,6 @@ eval:
       judge_max_tokens: 100
       temperature: 0.0
       top_p: 1.0
-      batch_size: 1
       local_server_host: 127.0.0.1
       local_server_port: 8000
       model_kwargs:
@@ -54,4 +54,4 @@ eval:
         gpu_memory_utilization: 0.9
       client_kwargs: {}
   params:
-    batch_size: 2
+    batch_size: 1

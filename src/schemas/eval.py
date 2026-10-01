@@ -22,7 +22,6 @@ class AlpacaEvalConfig(BaseModel):
     judge_max_tokens: int = 100
     temperature: float = 0.0
     top_p: float = 1.0
-    batch_size: int = 1
     local_server_host: str = "127.0.0.1"
     local_server_port: Optional[int] = None
     model_kwargs: Dict[str, Any] = Field(default_factory=dict)

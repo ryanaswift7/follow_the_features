@@ -33,7 +33,7 @@ class SuiteConfig(BaseModel):
     @property
     def ids(self) -> SuiteIDs:
         # Calculate hashes
-        p_id = f"prune_{config_hash(self.prune.cfg.model_dump())}"
+        p_id = f"prune_{config_hash(self.prune.cfg.model_dump())}_{self.prune.cfg.diversity_tag}"
         s_id = f"sft_{config_hash(self.sft.cfg.model_dump())}"
         e_id = f"eval_{config_hash(self.eval.cfg.model_dump())}"
         exp_id = f"exp_{string_hash(p_id + s_id + e_id + str(self.seed))}"

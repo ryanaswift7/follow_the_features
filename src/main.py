@@ -44,7 +44,8 @@ def run_experiments(suite: SuiteConfig):
     if run_lm_eval or run_judge_eval:
         for k in suite.prune.params.topk_features:
             for n in suite.prune.params.dataset_sizes:
-                print(f"[EXPERIMENT] Processing dataset size: {n}, top-k features: {k}")
+                model_label = suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name
+                print(f"[EXPERIMENT] Processing model: {model_label} (dataset size: {n}, top-k features: {k})")
 
                 eval_results_path = (
                     suite.dirs.get_trained_model_eval(dataset_size=n, topk=k)
@@ -71,7 +72,7 @@ def run_experiments(suite: SuiteConfig):
 
                 if need_eval:
                     print(
-                        f"[MISSING] Results missing or config hashes do not match for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Will run necessary steps."
+                        f"[MISSING] Results missing or config hashes do not match for model {model_label}. Will run necessary steps."
                     )
                     need_prune = True
 
@@ -102,26 +103,26 @@ def run_experiments(suite: SuiteConfig):
                             need_sft = False
                     if need_prune:
                         print(
-                            f"[MISSING] Dataset missing for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Running dataset pruning..."
+                            f"[MISSING] Dataset missing for {ds_dir.name} (model {model_label}). Running dataset pruning..."
                         )
                         run_prune(suite=suite, dataset_size=n, topk=k)
                     else:
                         print(
-                            f"[FOUND] Dataset exists for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}."
+                            f"[FOUND] Dataset exists at {ds_dir.name} for model {model_label}."
                         )
 
                     if need_sft:
                         print(
-                            f"[MISSING] Model missing for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}. Running SFT..."
+                            f"[MISSING] Model missing for model {model_label}. Running SFT..."
                         )
                         run_sft(suite=suite, dataset_size=n, topk=k)
                     else:
                         print(
-                            f"[FOUND] Model exists for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}."
+                            f"[FOUND] Model exists for model {model_label}."
                         )
 
                     print(
-                        f"[EVAL] Running evaluation for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name}..."
+                        f"[EVAL] Running evaluation for model {model_label}..."
                     )
                     run_eval(
                         suite=suite,
@@ -131,7 +132,7 @@ def run_experiments(suite: SuiteConfig):
                     )
                 else:
                     print(
-                        f"[FOUND] Results exist for model {suite.dirs.get_trained_model_root(dataset_size=n, topk=k).name} and config hashes match."
+                        f"[FOUND] Results exist for model {model_label} and config hashes match."
                     )
     else:
         print("[EXPERIMENT] Both LM eval and judge eval are disabled. Skipping per-model eval loop.")

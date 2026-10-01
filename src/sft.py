@@ -84,12 +84,13 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     full_ft = getattr(suite.sft.cfg, "full_ft", False)
     mode_str = "Full Fine-Tuning" if full_ft else "PEFT/LoRA"
     
-    print(f"[SFT] Starting {mode_str} for dataset_size={dataset_size}, topk={topk}...")
+    output_dir = suite.dirs.get_trained_model_root(dataset_size, topk)
+    model_label = output_dir.name
+    print(f"[SFT] Starting {mode_str} for model {model_label} (dataset_size={dataset_size}, topk={topk})...")
 
     model_id = suite.sft.cfg.base_model_id
     tokenizer_id = suite.sft.cfg.tokenizer_id
     dataset_path = suite.dirs.get_dataset_path(dataset_size, topk)
-    output_dir = suite.dirs.get_trained_model_root(dataset_size, topk)
     dataset_id = suite.prune.cfg.dataset_id
     batch_size = suite.prune.params.batch_size
 
@@ -163,7 +164,7 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     gc.collect()
     torch.cuda.empty_cache()
     print(
-        f"[SFT] Model training finished for dataset_size={dataset_size}, topk={topk}!"
+        f"[SFT] Model training finished for model {model_label}!"
     )
 
     return

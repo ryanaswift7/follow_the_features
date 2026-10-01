@@ -52,6 +52,58 @@ def compute_single_importance_task(args):
     return i, (mwf * decoder_norm) / h_clipped
 
 
+def apply_feature_diversity(
+    sorted_feature_indices,
+    sorted_importance_raw,
+    k: int,
+    diversity_param: Optional[float],
+    seed: int,
+):
+    if k <= 0:
+        return [], []
+
+    k = min(k, len(sorted_feature_indices))
+    if k == 0:
+        return [], []
+
+    if diversity_param is None or diversity_param <= 0.0:
+        selected_feature_indices = sorted_feature_indices[:k].tolist()
+        selected_feature_values = sorted_importance_raw[:k].tolist()
+        return selected_feature_indices, selected_feature_values
+
+    replace_count = min(int(k * diversity_param), k)
+    if replace_count <= 0:
+        selected_feature_indices = sorted_feature_indices[:k].tolist()
+        selected_feature_values = sorted_importance_raw[:k].tolist()
+        return selected_feature_indices, selected_feature_values
+
+    keep_count = k - replace_count
+    kept_indices = sorted_feature_indices[:keep_count]
+    kept_values = sorted_importance_raw[:keep_count]
+    replacement_pool = sorted_feature_indices[k:]
+    fallback_tail = sorted_feature_indices[keep_count:k]
+
+    rank_lookup = {int(idx): pos for pos, idx in enumerate(sorted_feature_indices.tolist())}
+    combined_indices = kept_indices.tolist()
+
+    if len(replacement_pool) > 0:
+        sample_count = min(replace_count, len(replacement_pool))
+        rng = np.random.default_rng(seed)
+        sampled_positions = rng.choice(len(replacement_pool), size=sample_count, replace=False)
+        sampled_indices = replacement_pool[sampled_positions]
+        combined_indices.extend(int(idx) for idx in sampled_indices.tolist())
+    else:
+        sample_count = 0
+
+    if sample_count < replace_count and len(fallback_tail) > 0:
+        fallback_needed = min(replace_count - sample_count, len(fallback_tail))
+        combined_indices.extend(int(idx) for idx in fallback_tail[:fallback_needed].tolist())
+
+    combined_indices.sort(key=lambda idx: rank_lookup[idx])
+    combined_values = [float(sorted_importance_raw[rank_lookup[idx]]) for idx in combined_indices]
+    return combined_indices, combined_values
+
+
 def get_topk_features(
     dataloader,
     model,
@@ -60,6 +112,9 @@ def get_topk_features(
     layer_idx,
     k,
     divide_by_entropy: bool,
+    diversity_param: Optional[float],
+    diversity_seed: int,
+    diversity_tag: str,
     full_report_path_csv: Path,
     topk_report_path_json: Path,
     llm_id: str,
@@ -304,6 +359,17 @@ def get_topk_features(
     log(f"Sort done in {time.time() - t0:.2f}s")
 
     # ==========================================
+    # SELECT DIVERSE TOP-K
+    # ==========================================
+    selected_feature_indices, selected_feature_values = apply_feature_diversity(
+        sorted_feature_indices=sorted_feature_indices,
+        sorted_importance_raw=sorted_importance_raw,
+        k=k,
+        diversity_param=diversity_param,
+        seed=diversity_seed,
+    )
+
+    # ==========================================
     # WRITE REPORTS
     # ==========================================
     log(f"Writing CSV → {csv_report_path}")
@@ -323,22 +389,21 @@ def get_topk_features(
 
     write_topk_feature_report_json(
         full_report_data=full_report_data,
-        k=k,
-        topk_report_path=json_topk_path,
+        selected_feature_indices=selected_feature_indices,
+        selected_feature_values=selected_feature_values,
+        topk_report_path=json_topk_path.with_name(
+            f"topk_feature_report_{diversity_tag}.json"
+        ),
     )
 
     log(f"TOTAL TIME: {time.time() - t0_total:.2f}s")
 
     return (
-        sorted_feature_indices[:k].tolist(),
-        sorted_importance_raw[:k].tolist(),
+        selected_feature_indices,
+        selected_feature_values,
     )
 
 
-import torch
-import heapq
-from tqdm import tqdm
-from typing import Literal
 
 def get_top_sample_indices(
     dataloader,
@@ -571,7 +636,8 @@ def get_formatting_function(dataset_id: str):
 
 
 def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
-    print(f"[PRUNE] Starting pruning for dataset_size={dataset_size}, topk={topk}...")
+    model_label = suite.dirs.get_trained_model_root(dataset_size=dataset_size, topk=topk).name
+    print(f"[PRUNE] Starting pruning for model {model_label} (dataset_size={dataset_size}, topk={topk})...")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Unpack config
@@ -584,7 +650,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     seq_agg_method = suite.prune.cfg.seq_agg_method
     feat_agg_method = suite.prune.cfg.feat_agg_method
 
-    print(f"--- Prune: dataset_size={dataset_size}, topk={topk} ---")
+    print(f"--- Prune: model={model_label} ---")
     # tokenizer = AutoTokenizer.from_pretrained(suite.sft.cfg.tokenizer_id, fix_mistral_regex=True)
     # tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     # tokenizer.padding_side = 'left'  # for inference
@@ -661,6 +727,9 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
         k=topk,
         device=device,
         divide_by_entropy=suite.prune.cfg.divide_by_entropy,
+        diversity_param=suite.prune.cfg.diversity_param,
+        diversity_seed=suite.seed,
+        diversity_tag=suite.prune.cfg.diversity_tag,
         full_report_path_csv=suite.dirs.datasets / "full_feature_report.csv",
         topk_report_path_json=suite.dirs.get_dataset_path(
             dataset_size=dataset_size, topk=topk) / "topk_feature_report.json",
@@ -703,4 +772,4 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     with open(dataset_cfg_path, "w") as f:
         json.dump(model_cfg, f, indent=4)
 
-    print(f"[PRUNE] Dataset generated for dataset_size={dataset_size}, topk={topk}.")
+    print(f"[PRUNE] Dataset generated for model {model_label}.")

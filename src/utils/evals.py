@@ -87,9 +87,9 @@ def write_eval_results_and_config(
 
 
 def run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir: Path) -> Tuple[Dict, Dict]:
-    """Phase 1: LM Eval Evaluation with full caching"""
+    """Phase 1: LM Eval evaluation with full caching"""
     print("\n" + "="*60)
-    print("PHASE 1: Starting LM Eval Evaluation...")
+    print("PHASE 1: Starting LM Eval evaluation...")
     print("="*60)
 
     if not suite.eval.cfg.lm_eval.run:
@@ -236,13 +236,13 @@ def run_phase4_judge_evaluation(
     topk,
     ref_model_seed: Optional[int] = None,
 ) -> Dict:
-    """Phase 4: AlpacaEval judge evaluation with integrated response generation."""
+    """Phase 2: AlpacaEval evaluation with separate generation and judging stages."""
     if not suite.eval.cfg.alpacaeval.run:
         print("Judge eval disabled in suite config. Skipping Phase 4.")
         return {}
 
     print("\n" + "=" * 60)
-    print("PHASE 4: Running AlpacaEval judge evaluation...")
+    print("PHASE 2: Running AlpacaEval evaluation...")
     print("=" * 60)
 
     if model_type == ModelType.BASE:
@@ -299,7 +299,7 @@ def run_phase5_save_results(
 ) -> Optional[Dict]:
     """Phase 5: Save Configuration and Results"""
     print("\n" + "="*60)
-    print("PHASE 5: Saving Configuration and Results...")
+    print("PHASE 3: Saving configuration and results...")
     print("="*60)
     
     if not save_results_and_config:
@@ -361,10 +361,10 @@ def eval_and_save(
         print("LM eval disabled in suite config. Skipping Phase 1.")
 
     # =====================================================================
-    # PHASE 2: AlpacaEval Judge Evaluation
+    # PHASE 2: AlpacaEval Evaluation
     # =====================================================================
     if suite.eval.cfg.alpacaeval.run:
-        print(f"\nModel type is {model_type}. Running AlpacaEval judge evaluation.")
+        print(f"\nModel type is {model_type}. Running AlpacaEval evaluation.")
         if model is not None:
             remove_hook_from_module(model, recurse=True)
             model.cpu()
@@ -382,10 +382,10 @@ def eval_and_save(
             ref_model_seed=ref_model_seed,
         )
     else:
-        print("Judge eval disabled in suite config. Skipping judge evaluation.")
+        print("AlpacaEval disabled in suite config. Skipping Phase 2.")
 
     # =====================================================================
-    # PHASE 5: Save Configuration and Results
+    # PHASE 3: Save Configuration and Results
     # =====================================================================
     cfg = run_phase5_save_results(
         raw_lm_eval_scores,

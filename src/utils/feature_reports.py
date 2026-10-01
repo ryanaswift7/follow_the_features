@@ -88,34 +88,35 @@ def write_full_feature_report_csv(
 
 
 def write_topk_feature_report_json(
-        full_report_data: dict, 
-        k: int, 
+        full_report_data: dict,
+        selected_feature_indices,
+        selected_feature_values,
         topk_report_path: Path) -> None:
-    
+
+    k = len(selected_feature_indices)
     print(f"[PRUNE] Generating Top-{k} Feature Report from full report...")
-    
+
     topk_report_data = {
         "cfg": full_report_data.get("cfg", {}).copy(),
         "features": {}
     }
-    
+
     # Update the config to reflect the sliced size
     topk_report_data["cfg"]["total_features_in_report"] = k
 
     # Update config to reflect dataset location
     topk_report_data['cfg']['dataset_path'] = str(topk_report_path.parent)
-    
-    # Extract just the top k features
-    count = 0
-    for feat_idx, feat_data in full_report_data.get("features", {}).items():
-        if count >= k:
-            break
-        topk_report_data["features"][feat_idx] = feat_data
-        count += 1
-        
+
+    # Preserve the selected ranking order from the pruning stage.
+    full_features = full_report_data.get("features", {})
+    for feat_idx, _feat_value in zip(selected_feature_indices, selected_feature_values):
+        feat_key = str(int(feat_idx))
+        if feat_key in full_features:
+            topk_report_data["features"][feat_key] = full_features[feat_key]
+
     topk_report_path.parent.mkdir(parents=True, exist_ok=True)
     with open(topk_report_path, "w", encoding="utf-8") as f:
         json.dump(topk_report_data, f, indent=4)
-        
+
     print(f"[PRUNE] Top-K Feature Report saved to {str(topk_report_path)}")
 

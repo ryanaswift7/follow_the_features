@@ -142,16 +142,18 @@ class SuiteDirs(BaseModel):
         the feature reports prior to the auto-creation by HF datasets lib.
         """
         name = Path(self.prune_cfg.dataset_id).name
-        return self.ensure_dir(self.datasets / f"{name}_ds{dataset_size}_topk{topk}.hf")
+        diversity_tag = getattr(self.prune_cfg, "diversity_tag", "divoff")
+        return self.ensure_dir(self.datasets / f"{name}_{diversity_tag}_ds{dataset_size}_topk{topk}.hf")
 
     def get_trained_model_root(self, dataset_size: int, topk: int) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
+        diversity_tag = getattr(self.prune_cfg, "diversity_tag", "divoff")
         return self.ensure_dir(
             self.models
             / "trained"
             / self.ids.prune
             / self.ids.sft
-            / f"ds{dataset_size}_topk{topk}_{name}"
+            / f"ds{dataset_size}_topk{topk}_{diversity_tag}_{name}"
         )
 
     def get_trained_model_eval(self, dataset_size: int, topk: int) -> Path:

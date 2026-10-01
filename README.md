@@ -70,6 +70,7 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 | `seq_agg_method` | string | One of `sum`, `mean`, `max`, `last_token`. |
 | `feat_agg_method` | string | One of `sum`, `mean`. |
 | `divide_by_entropy` | bool | Enables entropy normalization in feature scoring. |
+| `diversity_param` | float or null | Fraction in `[0, 1]` of the selected top-k features to replace with a uniform sample from the remaining features. Set it to `null` or `0.0` to disable diversity sampling. |
 
 ### `prune.params`
 
@@ -126,7 +127,6 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 | `judge_max_tokens` | int | Maximum judge response length. |
 | `temperature` | float | Sampling temperature. |
 | `top_p` | float | Nucleus sampling parameter. |
-| `batch_size` | int | AlpacaEval batch size. |
 | `local_server_host` | string | Host for local vLLM server. |
 | `local_server_port` | int or null | Port for local vLLM server. |
 | `model_kwargs` | map | Backend-specific model kwargs. |
@@ -136,7 +136,7 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `batch_size` | int | Batch size used by evaluation orchestration. |
+| `batch_size` | int | Batch size used by LM eval; AlpacaEval judge annotations run with batch size 1 to match the single-example prompt template. |
 
 ## Supported `seq_agg_method` Values
 
@@ -164,6 +164,7 @@ prune:
     seq_agg_method: last_token
     feat_agg_method: sum
     divide_by_entropy: true
+    diversity_param: 0.2
   params:
     batch_size: 2
     dataset_sizes: [2]
@@ -196,7 +197,6 @@ eval:
       judge_max_tokens: 100
       temperature: 0.0
       top_p: 1.0
-      batch_size: 1
       local_server_host: 127.0.0.1
       local_server_port: 8000
       model_kwargs:
