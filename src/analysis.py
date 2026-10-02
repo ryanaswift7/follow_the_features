@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -8,12 +10,30 @@ from src.utils.constants import EVAL_RESULTS_FILENAME, NAN_RESULT
 from src.utils.enums import ModelType
 
 
+def _mean_numeric_dicts(dicts: list[dict]) -> dict:
+    """Average numeric leaves while preserving nested result structures."""
+    if not dicts:
+        return {}
+
+    keys = set().union(*(item.keys() for item in dicts))
+    result = {}
+    for key in sorted(keys):
+        values = [item[key] for item in dicts if key in item]
+        numeric = [value for value in values if isinstance(value, (int, float)) and not isinstance(value, bool)]
+        nested = [value for value in values if isinstance(value, dict)]
+        if numeric:
+            result[key] = round(sum(numeric) / len(numeric), 4)
+        elif nested:
+            result[key] = _mean_numeric_dicts(nested)
+    return result
+
+
 def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
     """
     Aggregates results into a long-format DataFrame for easy grouping/plotting.
     Each row contains model identifiers, params (topk, n), and eval metrics.
     """
-    print(f"[AGGREGATE] Aggregating results from: {suite.dirs.suite_root}")
+    print(f"[AGGREGATE] Aggregating results from: {suite.dirs.main_results}")
     rows = []
 
     def load_json_safe(path):
@@ -26,15 +46,27 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
         except (json.JSONDecodeError, IOError):
             return None
 
-    base_data = load_json_safe(suite.dirs.base_model_eval / EVAL_RESULTS_FILENAME)
-    if base_data:
-        base_data.update(
-            {
-                "model_type": ModelType.BASE.value,
-                "topk_features": NAN_RESULT,
-                "dataset_size": NAN_RESULT,
-            }
+    base_seed_results = []
+    for seed in suite.seeds:
+        base_data = load_json_safe(
+            suite.dirs.get_base_model_eval_by_seed(seed) / EVAL_RESULTS_FILENAME
         )
+        if base_data:
+            base_seed_results.append(base_data)
+    if base_seed_results:
+        base_data = {
+            "lm_eval_results": _mean_numeric_dicts(
+                [item["lm_eval_results"] for item in base_seed_results if item.get("lm_eval_results")]
+            ),
+            "reference_results": _mean_numeric_dicts(
+                [item["reference_results"] for item in base_seed_results if item.get("reference_results")]
+            ),
+            "seed_count": len(base_seed_results),
+            "seeds": [item.get("seed") for item in base_seed_results],
+            "model_type": ModelType.BASE.value,
+            "topk_features": NAN_RESULT,
+            "dataset_size": NAN_RESULT,
+        }
         rows.append(base_data)
 
     ref_data = load_json_safe(suite.dirs.reference_model_summary_eval / EVAL_RESULTS_FILENAME)
@@ -50,22 +82,130 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
 
     for k in suite.prune.params.topk_features:
         for n in suite.prune.params.dataset_sizes:
-            path = (
-                suite.dirs.get_trained_model_eval(dataset_size=n, topk=k)
-                / EVAL_RESULTS_FILENAME
-            )
-            data = load_json_safe(path)
-            if data:
-                data.update(
-                    {
-                        "model_type": ModelType.ADAPTER.value,
-                        "topk_features": k,
-                        "dataset_size": n,
-                    }
-                )
+            seed_results = []
+            for seed in suite.seeds:
+                path = suite.for_seed(seed).dirs.get_trained_model_eval(dataset_size=n, topk=k) / EVAL_RESULTS_FILENAME
+                data = load_json_safe(path)
+                if data:
+                    seed_results.append(data)
+            if seed_results:
+                data = {
+                    "lm_eval_results": _mean_numeric_dicts(
+                        [item["lm_eval_results"] for item in seed_results if item.get("lm_eval_results")]
+                    ),
+                    "reference_results": _mean_numeric_dicts(
+                        [item["reference_results"] for item in seed_results if item.get("reference_results")]
+                    ),
+                    "seed_count": len(seed_results),
+                    "seeds": [item.get("seed") for item in seed_results],
+                    "model_type": ModelType.ADAPTER.value,
+                    "topk_features": k,
+                    "dataset_size": n,
+                }
                 rows.append(data)
 
     return pd.DataFrame(rows)
+
+
+def write_manifest(suite: SuiteConfig, results_df: pd.DataFrame) -> Path:
+    """Write aggregate model scores and relative model locations."""
+    project_root = Path(__file__).resolve().parents[1]
+
+    def relative_model_path(path: Path) -> str:
+        return os.path.relpath(path.resolve(), project_root).replace(os.sep, "/")
+
+    def scores_for_row(row: pd.Series | None) -> dict:
+        if row is None:
+            return {}
+        return {
+            key: row[key]
+            for key in ("lm_eval_results", "reference_results")
+            if isinstance(row.get(key), dict)
+        }
+
+    def find_row(model_type: str, dataset_size=None, topk_features=None):
+        if results_df.empty:
+            return None
+        matches = results_df[results_df["model_type"] == model_type]
+        if dataset_size is not None:
+            matches = matches[matches["dataset_size"] == dataset_size]
+        if topk_features is not None:
+            matches = matches[matches["topk_features"] == topk_features]
+        return None if matches.empty else matches.iloc[0]
+
+    manifest = {
+        "suite": {
+            "title": suite.title,
+            "seeds": suite.seeds,
+            "experiment_id": suite.ids.experiment,
+            "prune_id": suite.ids.prune,
+            "sft_id": suite.ids.sft,
+            "eval_id": suite.ids.eval,
+        },
+        "baselines": [],
+        "references": [],
+        "trained_models": [],
+    }
+
+    base_row = find_row(ModelType.BASE.value)
+    if base_row is not None:
+        manifest["baselines"].append(
+            {
+                "name": Path(suite.sft.cfg.base_model_id).name,
+                "model_type": ModelType.BASE.value,
+                "seeds": suite.seeds,
+                "model_paths": [relative_model_path(suite.dirs.base_model_root)],
+                "evaluation_paths": [
+                    relative_model_path(suite.dirs.get_base_model_eval_by_seed(seed))
+                    for seed in suite.seeds
+                ],
+                "scores": scores_for_row(base_row),
+            }
+        )
+
+    reference_row = find_row(ModelType.REFERENCE.value)
+    if reference_row is not None:
+        manifest["references"].append(
+            {
+                "name": f"reference_{Path(suite.sft.cfg.base_model_id).name}",
+                "model_type": ModelType.REFERENCE.value,
+                "seeds": suite.seeds,
+                "model_paths": [
+                    relative_model_path(suite.dirs.get_ref_model_root_by_seed(seed))
+                    for seed in suite.seeds
+                ],
+                "scores": scores_for_row(reference_row),
+            }
+        )
+
+    for topk in suite.prune.params.topk_features:
+        for dataset_size in suite.prune.params.dataset_sizes:
+            row = find_row(ModelType.ADAPTER.value, dataset_size, topk)
+            if row is None:
+                continue
+            manifest["trained_models"].append(
+                {
+                    "name": f"ds{dataset_size}_topk{topk}",
+                    "model_type": ModelType.ADAPTER.value,
+                    "dataset_size": dataset_size,
+                    "topk_features": topk,
+                    "seeds": suite.seeds,
+                    "model_paths": [
+                        relative_model_path(
+                            suite.for_seed(seed).dirs.get_trained_model_root(
+                                dataset_size=dataset_size, topk=topk
+                            )
+                        )
+                        for seed in suite.seeds
+                    ],
+                    "scores": scores_for_row(row),
+                }
+            )
+
+    manifest_path = suite.dirs.main_results / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest_path
 
 
 def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd.DataFrame:
@@ -104,7 +244,13 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
         print("[PLOT] No evaluation rows found. Skipping plots and summary generation.")
         return original_df
 
-    PLOT_METRICS = ["average_judge_score", "length_controlled_winrate", "win_rate", "average_perplexity", "average_lm_eval_score"]
+    plot_metrics = [
+        metric
+        for metric in all_metrics
+        if metric == "alpacaeval" or metric == "leaderboard" or metric in {
+            "ifeval", "bbh", "math_hard", "gpqa", "musr", "mmlu_pro"
+        }
+    ]
 
     baseline_df = scores_df[scores_df["model_type"] != ModelType.ADAPTER.value].copy()
     topk_values = [k for k in scores_df["topk_features"].unique() if k != NAN_RESULT]
@@ -140,7 +286,7 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
         table_path.mkdir(parents=True, exist_ok=True)
 
         for metric in all_metrics:
-            if metric not in PLOT_METRICS:
+            if metric not in plot_metrics:
                 continue
 
             plt.figure(figsize=(10, 6))

@@ -730,7 +730,9 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
         diversity_param=suite.prune.cfg.diversity_param,
         diversity_seed=suite.seed,
         diversity_tag=suite.prune.cfg.diversity_tag,
-        full_report_path_csv=suite.dirs.datasets / "full_feature_report.csv",
+        full_report_path_csv=suite.dirs.get_dataset_path(
+            dataset_size=dataset_size, topk=topk
+        ).parent / "full_feature_report.csv",
         topk_report_path_json=suite.dirs.get_dataset_path(
             dataset_size=dataset_size, topk=topk) / "topk_feature_report.json",
         llm_id=suite.prune.cfg.prune_model_id,
@@ -768,6 +770,7 @@ def run_prune(suite: SuiteConfig, dataset_size: int, topk: int):
     )
     model_cfg = {
         PRUNE_ID_KEY: suite.ids.prune,
+        "seed": suite.active_seed,
     }
     with open(dataset_cfg_path, "w") as f:
         json.dump(model_cfg, f, indent=4)

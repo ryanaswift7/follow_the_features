@@ -1,6 +1,6 @@
 title: base_full_gemma3_no_entropy
 output_dir: experiments
-seed: 3
+seeds: [3]
 debug_mode: false
 prune:
   cfg:
@@ -36,12 +36,12 @@ sft:
     base_model_id: google/gemma-3-1b-pt
     max_seq_length: 4750
     learning_rate: 0.0002
+    lr_scheduler_type: cosine
     max_original_samples: 51760
   params:
     batch_size: 2
 eval:
   cfg:
-    num_ref_models: 3
     lm_eval:
       run: true
       max_new_tokens: 256
@@ -49,8 +49,9 @@ eval:
       task_limit: null
     alpacaeval:
       run: true
-      backend: vllm
-      model_name: llama3.3:70b
+      candidate_backend: vllm
+      judge_backend: vllm
+      model_name: Qwen/Qwen3.8-27B-FP8
       dataset: alpaca_eval_gpt4_baseline
       max_instances: 300
       max_new_tokens: 256

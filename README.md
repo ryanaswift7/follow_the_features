@@ -51,7 +51,7 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 | --- | --- | --- |
 | `title` | string | Suite name used in output paths. |
 | `output_dir` | path/string | Root directory for generated artifacts. |
-| `seed` | int | Reproducibility seed. |
+| `seeds` | list[int] | Reproducibility seeds. Every model is trained and evaluated for each seed, then numeric scores are averaged across seeds. |
 | `debug_mode` | bool | Convenience flag for small/debug runs. |
 | `prune` | object | Pruning config and parameters. |
 | `sft` | object | Fine-tuning config and parameters. |
@@ -86,10 +86,10 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 | --- | --- | --- |
 | `max_seq_length` | int | Max token length used during fine-tuning. |
 | `learning_rate` | float | SFT learning rate. |
-| `max_original_samples` | int | Upper bound on source training samples. |
+| `lr_scheduler_type` | string | Required learning-rate scheduler. Supported values match Transformers' scheduler types. |
 | `tokenizer_id` | string | Hugging Face tokenizer ID. |
 | `base_model_id` | string | Hugging Face base model ID for SFT. |
-| `full_ft` | bool | `true` for full fine-tuning, otherwise adapter-based training. Default: `false`. |
+| `full_ft` | bool | Required. `true` for full fine-tuning, `false` for LoRA/PEFT. |
 
 ### `sft.params`
 
@@ -101,7 +101,7 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 
 | Field | Type | Options / Notes |
 | --- | --- | --- |
-| `num_ref_models` | int | Number of reference models to evaluate. |
+| `seeds` | list[int] | Seeds used for pruning, SFT, reference models, and evaluation. Results for each model are averaged across these seeds. |
 | `lm_eval` | object | LM-eval configuration. |
 | `alpacaeval` | object | AlpacaEval configuration. |
 
@@ -119,18 +119,23 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 | Field | Type | Options / Notes |
 | --- | --- | --- |
 | `run` | bool | Enables AlpacaEval-style judging. |
-| `backend` | string | One of `api`, `vllm`. |
+| `candidate_backend` | string | `huggingface` or `vllm`; selects the candidate-generation backend. |
+| `judge_backend` | string | `api` or `vllm`; selects the judge backend. |
 | `model_name` | string or null | Model name passed to the judge backend. |
+| `candidate_dtype` | string | Candidate model dtype; defaults to `bfloat16`. |
+| `judge_dtype` | string | Local judge dtype; defaults to `auto` so quantized checkpoints use their native format. |
 | `dataset` | string | One of `alpaca_eval`, `alpaca_eval_gpt4_baseline`. |
 | `max_instances` | int or null | Optional cap on evaluated instances. |
 | `max_new_tokens` | int | Generation length. |
-| `judge_max_tokens` | int | Maximum judge response length. |
+| `judge_max_tokens` | int | Maximum judge response length; defaults to `512`. |
+| `judge_enable_thinking` | bool | Explicitly enables or disables chat-template reasoning for a local vLLM judge; defaults to `false`. |
 | `temperature` | float | Sampling temperature. |
 | `top_p` | float | Nucleus sampling parameter. |
-| `local_server_host` | string | Host for local vLLM server. |
-| `local_server_port` | int or null | Port for local vLLM server. |
-| `model_kwargs` | map | Backend-specific model kwargs. |
-| `client_kwargs` | map | Backend-specific client kwargs. |
+| `model_kwargs` | map | Compatibility alias for local judge model kwargs. |
+| `candidate_model_kwargs` | map | Keyword arguments passed to the local candidate model. |
+| `judge_model_kwargs` | map | Keyword arguments passed to the local vLLM judge. |
+
+Local vLLM mode uses an in-process decoder and does not start an OpenAI-compatible HTTP server. Set `candidate_backend: vllm` and `judge_backend: vllm` for fully local evaluation, or set only `candidate_backend: vllm` with `judge_backend: api` to use a local candidate and an API judge. vLLM tensor parallelism is set automatically to the number of CUDA GPUs visible to the process, including the effect of `CUDA_VISIBLE_DEVICES`; any configured `tensor_parallel_size` is overridden. Local judge thinking is explicitly disabled by default through the tokenizer's `enable_thinking=False` setting and a zero thinking-token budget.
 
 ### `eval.params`
 
@@ -152,7 +157,7 @@ The pruning scorer supports these sequence aggregation methods:
 ```yaml
 title: debug
 output_dir: debugging
-seed: 3
+seeds: [3, 4]
 debug_mode: true
 prune:
   cfg:
@@ -175,13 +180,12 @@ sft:
     base_model_id: google/gemma-3-1b-pt
     max_seq_length: 10
     learning_rate: 0.0002
-    max_original_samples: 2
+    lr_scheduler_type: cosine
     full_ft: false
   params:
     batch_size: 2
 eval:
   cfg:
-    num_ref_models: 2
     lm_eval:
       run: true
       max_new_tokens: 2
@@ -189,27 +193,28 @@ eval:
       task_limit: 1
     alpacaeval:
       run: true
-      backend: vllm
-      model_name: gemma3:27b-it-qat
+       model_name: Qwen/Qwen3.8-27B-FP8
+       candidate_backend: vllm
+       judge_backend: vllm
+       candidate_dtype: bfloat16
+       judge_dtype: auto
       dataset: alpaca_eval_gpt4_baseline
       max_instances: 2
       max_new_tokens: 2
-      judge_max_tokens: 100
+      judge_max_tokens: 512
       temperature: 0.0
       top_p: 1.0
-      local_server_host: 127.0.0.1
-      local_server_port: 8000
-      model_kwargs:
-        tensor_parallel_size: 1
+      candidate_model_kwargs:
         gpu_memory_utilization: 0.9
-      client_kwargs: {}
+      judge_model_kwargs:
+        gpu_memory_utilization: 0.9
   params:
     batch_size: 2
 ```
 
 ## Output Layout
 
-Generated artifacts are written under `output_dir/title/...` and experiment result summaries are stored under `results/<experiment_id>/...` within the suite root.
+Generated models and datasets are written under `output_dir/models/...` and `output_dir/datasets/...`. Experiment results are written under `output_dir/results/title/<experiment_id>/`, including the aggregate `manifest.json`, tables, and plots.
 
 The pruning stage also writes dataset metadata files so later runs can verify config hashes before reusing existing artifacts.
 

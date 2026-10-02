@@ -21,7 +21,8 @@ dependencies = [
     "immutabledict>=4.3.1",
     "faiss-cpu>=1.13.2",
     "vllm==0.19.1",
-    "alpaca-eval>=0.6.6",
+    "alpaca-eval==0.6.6",
+    "pytest>=9.1.1",
 ]
 
 [tool.setuptools.packages.find]

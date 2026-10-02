@@ -11,7 +11,11 @@ from trl.trainer.sft_trainer import SFTTrainer
 from src.prune import get_formatting_function
 from src.schemas.suite import SuiteConfig
 from src.sft import PEFT_CONFIG, generate_sft_trainer_args
-from src.utils.constants import EVAL_CONFIG_FILENAME, EVAL_RESULTS_FILENAME
+from src.utils.constants import (
+    EVAL_CONFIG_FILENAME,
+    EVAL_RESULTS_FILENAME,
+    has_current_eval_metrics,
+)
 from src.utils.enums import ModelType
 from src.utils.evals import eval_and_save
 from src.utils.load_model_and_tokenizer import load_model_and_tokenizer
@@ -26,13 +30,6 @@ def parse_args():
         "-c",
         type=str,
         help="Path to the experiment configuration YAML file.",
-    )
-    parser.add_argument(
-        "--num-ref-models",
-        "-n",
-        type=int,
-        default=3,
-        help="Number of reference models to generate (default: 3).",
     )
     return parser.parse_args()
 
@@ -56,10 +53,18 @@ def _mean_numeric_dicts(dicts: list[dict[str, Any]]) -> dict[str, Any]:
         ]
         if values:
             aggregated[key] = round(sum(values) / len(values), 4)
+
+    nested_keys = set().union(*(item.keys() for item in dicts)) - numeric_keys
+    for key in sorted(nested_keys):
+        nested_values = [item[key] for item in dicts if isinstance(item.get(key), dict)]
+        if nested_values:
+            aggregated[key] = _mean_numeric_dicts(nested_values)
     return aggregated
 
 
-def _trial_has_valid_results(trial_output_dir, suite: SuiteConfig, expected_sections: list[str]) -> bool:
+def _trial_has_valid_results(
+    trial_output_dir, suite: SuiteConfig, expected_sections: list[str], seed: int
+) -> bool:
     results_path = trial_output_dir / EVAL_RESULTS_FILENAME
     config_path = trial_output_dir / EVAL_CONFIG_FILENAME
     if not (results_path.exists() and config_path.exists()):
@@ -73,10 +78,14 @@ def _trial_has_valid_results(trial_output_dir, suite: SuiteConfig, expected_sect
     except (json.JSONDecodeError, OSError):
         return False
 
-    if cfg.get("eval_id") != suite.ids.eval:
+    if cfg.get("eval_id") != suite.ids.eval or cfg.get("seed") != seed:
         return False
 
-    return all(isinstance(results, dict) and results.get(section) is not None for section in expected_sections)
+    return has_current_eval_metrics(
+        results,
+        run_lm_eval="lm_eval_results" in expected_sections,
+        run_judge_eval="reference_results" in expected_sections,
+    )
 
 
 def generate_reference_models(
@@ -84,10 +93,9 @@ def generate_reference_models(
     run_lm_eval: bool = True,
     run_judge_eval: bool = True,
 ):
-    num_ref_models = suite.eval.cfg.num_ref_models
+    configured_seeds = suite.seeds
     dataset_id = suite.prune.cfg.dataset_id
     batch_size = suite.prune.params.batch_size
-    seed = suite.seed
     base_model_id = suite.sft.cfg.base_model_id
 
     overall_results_path = suite.dirs.reference_model_summary_eval / EVAL_RESULTS_FILENAME
@@ -97,7 +105,8 @@ def generate_reference_models(
     print("[REF MODELS] Initializing Reference Model Generator")
     print(f"  - Dataset:      {dataset_id}")
     print(f"  - Base Model:   {base_model_id}")
-    print(f"  - Ref Models:   {num_ref_models}")
+    print(f"  - Ref Models:   {len(configured_seeds)}")
+    print(f"  - Seeds:        {configured_seeds}")
     print("  - Training on:  FULL DATASET")
     print(f"{'=' * 50}\n")
 
@@ -117,9 +126,10 @@ def generate_reference_models(
                 final_results = json.load(f)
             with open(overall_config_path, "r") as f:
                 cfg = json.load(f)
-            if cfg.get("eval_id") == suite.ids.eval and all(
-                isinstance(final_results, dict) and final_results.get(section) is not None
-                for section in expected_sections
+            if (
+                cfg.get("eval_id") == suite.ids.eval
+                and cfg.get("seeds") == configured_seeds
+                and has_current_eval_metrics(final_results, run_lm_eval, run_judge_eval)
             ):
                 print("[REF MODELS] Cached aggregate reference results found. Skipping generation.")
                 return final_results, cfg
@@ -127,11 +137,10 @@ def generate_reference_models(
             pass
 
     models_to_train = []
-    for i in range(num_ref_models):
-        trial_seed = seed + i
+    for trial_seed in configured_seeds:
         trial_output_dir = suite.dirs.get_ref_model_root_by_seed(trial_seed)
-        if not _trial_has_valid_results(trial_output_dir, suite, expected_sections):
-            models_to_train.append(i)
+        if not _trial_has_valid_results(trial_output_dir, suite, expected_sections, trial_seed):
+            models_to_train.append(trial_seed)
 
     if models_to_train:
         print(f"[REF MODELS] Loading dataset: {dataset_id}...")
@@ -161,20 +170,19 @@ def generate_reference_models(
     cfg = None
 
     print("\n[REF MODELS] Processing Reference Models...")
-    pbar_models = tqdm(range(num_ref_models), desc="Training/Loading Ref Models", position=0)
+    pbar_models = tqdm(configured_seeds, desc="Training/Loading Ref Models", position=0)
 
-    for i in pbar_models:
-        trial_seed = seed + i
+    for model_index, trial_seed in enumerate(pbar_models):
         trial_output_dir = suite.dirs.get_ref_model_root_by_seed(trial_seed)
         trial_output_dir.mkdir(parents=True, exist_ok=True)
 
         trial_results_path = trial_output_dir / EVAL_RESULTS_FILENAME
         trial_config_path = trial_output_dir / EVAL_CONFIG_FILENAME
 
-        pbar_models.set_description(f"Ref Model {i + 1}/{num_ref_models}")
+        pbar_models.set_description(f"Ref Model {model_index + 1}/{len(configured_seeds)} (seed {trial_seed})")
 
-        if _trial_has_valid_results(trial_output_dir, suite, expected_sections):
-            print(f"\n[REF MODELS] Cached results for Ref Model {i + 1} are valid. Loading.")
+        if _trial_has_valid_results(trial_output_dir, suite, expected_sections, trial_seed):
+            print(f"\n[REF MODELS] Cached results for Ref Model {model_index + 1} are valid. Loading.")
             with open(trial_results_path, "r") as f:
                 current_scores = json.load(f)
             with open(trial_config_path, "r") as f:
@@ -227,22 +235,31 @@ def generate_reference_models(
             trainer_args = generate_sft_trainer_args(
                 suite=suite,
                 output_dir=str(trial_output_dir),
+                num_training_examples=len(dataset),
             )
 
+            trainer_kwargs = {
+                "model": eval_model,
+                "args": trainer_args,
+                "train_dataset": dataset,
+                "processing_class": tokenizer,
+            }
+            if not suite.sft.cfg.full_ft:
+                trainer_kwargs["peft_config"] = PEFT_CONFIG
+
             trainer = SFTTrainer(
-                model=eval_model,
-                args=trainer_args,
-                train_dataset=dataset,
-                peft_config=PEFT_CONFIG,
-                processing_class=tokenizer,
+                **trainer_kwargs,
             )
 
             trainer.train()
-            merged_model = trainer.model.merge_and_unload()
-            merged_model.save_pretrained(trial_output_dir)
+            if suite.sft.cfg.full_ft:
+                trainer.save_model(str(trial_output_dir))
+                eval_model = trainer.model
+            else:
+                merged_model = trainer.model.merge_and_unload()
+                merged_model.save_pretrained(trial_output_dir)
+                eval_model = merged_model
             tokenizer.save_pretrained(trial_output_dir)
-
-            eval_model = merged_model
 
         current_scores, cfg = eval_and_save(
             model=eval_model,
@@ -280,6 +297,8 @@ def generate_reference_models(
     with open(overall_results_path, "w") as f:
         json.dump(final_results, f, indent=4)
     with open(overall_config_path, "w") as f:
+        cfg = dict(cfg or {})
+        cfg["seeds"] = configured_seeds
         json.dump(cfg, f, indent=4)
 
     print("[REF MODELS] Generation Complete.")

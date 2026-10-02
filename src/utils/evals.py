@@ -40,6 +40,9 @@ def write_eval_results_and_config(
         )
         model_path = suite.dirs.get_ref_model_root_by_seed(ref_model_seed).as_posix()
         dataset_path = None
+    elif model_type == ModelType.BASE:
+        model_path = suite.dirs.base_model_root.as_posix()
+        dataset_path = None
     else:
         model_path = None
         dataset_path = None
@@ -57,6 +60,8 @@ def write_eval_results_and_config(
         "prune_config": suite.prune.cfg.model_dump(),
         "sft_config": suite.sft.cfg.model_dump(),
         "eval_config": suite.eval.cfg.model_dump(),
+        "seed": ref_model_seed if ref_model_seed is not None else suite.active_seed,
+        "seeds": suite.seeds,
     }
     # results = {
     #     "eval_scores": eval_scores,
@@ -67,7 +72,7 @@ def write_eval_results_and_config(
             dataset_size=cast(int, dataset_size), topk=cast(int, topk)
         )
     elif model_type == ModelType.BASE:
-        eval_dir = suite.dirs.base_model_eval
+        eval_dir = suite.dirs.get_base_model_eval_by_seed(suite.seed)
     elif model_type == ModelType.REFERENCE:
         assert ref_model_seed is not None, (
             "Seed must be provided when running evals on reference models."
@@ -106,11 +111,23 @@ def run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir: Path) -> Tuple[Di
     cache_path = gen_cache_dir / "phase1_lm_eval.json"
 
     # --- CACHE CHECK ---
+    selected_keys = {
+        "leaderboard_ifeval": "ifeval",
+        "leaderboard_bbh": "bbh",
+        "leaderboard_math_hard": "math_hard",
+        "leaderboard_gpqa": "gpqa",
+        "leaderboard_musr": "musr",
+        "leaderboard_mmlu_pro": "mmlu_pro",
+    }
+    expected_filtered_keys = {"leaderboard", *selected_keys.values()}
+
     if cache_path.exists():
         print(f"Found cached Phase 1 results at {cache_path}. Skipping evaluation.")
         with open(cache_path, "r") as f:
             cache_data = json.load(f)
-        return cache_data["filtered"], cache_data["raw"]
+        if cache_data.get("filter_version") == 2 and set(cache_data.get("filtered", {})) == expected_filtered_keys:
+            return cache_data["filtered"], cache_data["raw"]
+        print("Cached Phase 1 metric format is stale. Recomputing evaluation.")
 
     # --- EVALUATION ---
     lm_eval_results = {}
@@ -201,25 +218,21 @@ def run_phase1_lm_eval(model, tokenizer, suite, gen_cache_dir: Path) -> Tuple[Di
         label = print_labels.get(found_name, found_name)
         print(f"  > {task_name:<20} | {label}: {found_val:.4f}")
 
-    selected_keys = [
-        "leaderboard_ifeval",
-        "leaderboard_bbh",
-        "leaderboard_math_hard",
-        "leaderboard_gpqa",
-        "leaderboard_musr",
-        "leaderboard_mmlu_pro",
-    ]
-    
-    filtered_lm_eval_results = {k: v for k, v in lm_eval_results.items() if k in selected_keys}
-    
+    filtered_lm_eval_results = {
+        output_key: lm_eval_results[input_key]
+        for input_key, output_key in selected_keys.items()
+        if input_key in lm_eval_results
+    }
+
     if filtered_lm_eval_results:
-        avg_score = round(sum(list(filtered_lm_eval_results.values())) / len(filtered_lm_eval_results), 4)
-        filtered_lm_eval_results["average_lm_eval_score"] = avg_score
-        print(f"  > Filtered Average Score : {avg_score:.4f}")
+        leaderboard_score = round(sum(filtered_lm_eval_results.values()) / len(filtered_lm_eval_results), 4)
+        filtered_lm_eval_results["leaderboard"] = leaderboard_score
+        print(f"  > Leaderboard Average Score: {leaderboard_score:.4f}")
         
     # --- SAVE CACHE ---
     print("Saving Phase 1 results to cache...")
     cache_data = {
+        "filter_version": 2,
         "filtered": filtered_lm_eval_results,
         "raw": raw_results["results"]
     }
@@ -247,7 +260,7 @@ def run_phase4_judge_evaluation(
 
     if model_type == ModelType.BASE:
         model_path = suite.sft.cfg.base_model_id
-        eval_output_dir = suite.dirs.base_model_eval
+        eval_output_dir = suite.dirs.get_base_model_eval_by_seed(suite.seed)
     elif model_type == ModelType.ADAPTER:
         assert dataset_size is not None and topk is not None, (
             "dataset_size and topk must be provided for adapter judge evaluation."
@@ -290,8 +303,7 @@ def run_phase4_judge_evaluation(
             json.dump(raw, f, indent=4)
 
     print(
-        f"AlpacaEval complete: length_controlled_winrate={leader_row.get('length_controlled_winrate')}, "
-        f"win_rate={leader_row.get('win_rate')}"
+        f"AlpacaEval complete: alpacaeval={leader_row.get('alpacaeval')}"
     )
     return leader_row
 def run_phase5_save_results(

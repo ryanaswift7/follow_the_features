@@ -24,7 +24,7 @@ def main():
         print(f"Error reading the file: {e}")
         sys.exit(1)
 
-    required_cols = ['model_type', 'topk_features', 'dataset_size', 'average_judge_score']
+    required_cols = ['model_type', 'topk_features', 'dataset_size', 'alpacaeval']
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         print(f"Error: Missing required columns in the dataset: {missing_cols}")
@@ -48,7 +48,7 @@ def main():
     sns.scatterplot(
         data=filtered_df,
         x='topk_features',
-        y='average_judge_score',
+        y='alpacaeval',
         hue='model_type',
         s=120,
         alpha=0.8,
@@ -60,7 +60,7 @@ def main():
     sns.regplot(
         data=filtered_df, 
         x='topk_features', 
-        y='average_judge_score', 
+        y='alpacaeval',
         scatter=False,
         color='gray', 
         line_kws={'linestyle': '--', 'linewidth': 1.5, 'alpha': 0.6}
@@ -68,11 +68,11 @@ def main():
 
     # Add (x, y) coordinate labels to each data point with a larger font
     for idx, row in filtered_df.iterrows():
-        label_text = f"({row['topk_features']}, {row['average_judge_score']:.2f})"
+        label_text = f"({row['topk_features']}, {row['alpacaeval']:.2f})"
         
         plt.annotate(
             label_text,                                         
-            (row['topk_features'], row['average_judge_score']), 
+            (row['topk_features'], row['alpacaeval']),
             textcoords="offset points",                         
             xytext=(12, 10),                                    # Increased offset for the larger text
             ha='left',                                          
@@ -86,7 +86,7 @@ def main():
     
     # Made axis labels much bigger and bold for readability
     plt.xlabel('Top-K Features', fontsize=18, fontweight='bold', labelpad=10)
-    plt.ylabel('Average Judge Score', fontsize=18, fontweight='bold', labelpad=10)
+    plt.ylabel('AlpacaEval', fontsize=18, fontweight='bold', labelpad=10)
     
     # Also increased the size of the tick marks on the axes to match the new proportions
     plt.tick_params(axis='both', which='major', labelsize=14)

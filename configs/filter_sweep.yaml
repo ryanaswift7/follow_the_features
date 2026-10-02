@@ -1,12 +1,12 @@
-title: do_base_full_gemma3_diversity
-output_dir: fdp_experiments
-seed: 67
+title: filter_sweep
+output_dir: filter_experiments
+seeds: [6, 7, 67]
 debug_mode: false
 prune:
   cfg:
-    prune_model_id: google/gemma-3-270m-it
-    sae_release: gemma-scope-2-270m-it-res
-    sae_id: layer_9_width_65k_l0_medium
+    prune_model_id: google/gemma-3-12b-it
+    sae_release: gemma-scope-2-12b-it-res
+    sae_id: layer_24_width_65k_l0_medium
     dataset_id: yahma/alpaca-cleaned
     num_samples: 51760
     seq_agg_method: last_token
@@ -18,31 +18,31 @@ prune:
     dataset_sizes:
     - 10
     - 100
-    - 500
+    # - 500
     - 1000
-    - 5000
+    # - 5000
     - 10000
-    - 51760
+    # - 51760
     topk_features:
     - 1
     - 5
     - 10
-    - 50
+    # - 50
     - 100
-    - 150
+    # - 150
     - 200
 sft:
   cfg:
-    tokenizer_id: google/gemma-3-270m-it
-    base_model_id: google/gemma-3-1b-pt
+    tokenizer_id: HuggingFaceTB/SmolLM3-3B
+    base_model_id: HuggingFaceTB/SmolLM3-3B-Base
     max_seq_length: 256
     learning_rate: 0.0002
-    max_original_samples: 51760
+    lr_scheduler_type: cosine
+    full_ft: false
   params:
     batch_size: 2
 eval:
   cfg:
-    num_ref_models: 3
     lm_eval:
       run: true
       max_new_tokens: 256
@@ -51,17 +51,19 @@ eval:
       task_limit: null
     alpacaeval:
       run: true
-      backend: vllm
-      model_name: meta-llama/Meta-Llama-3.1-8B-Instruct
+      candidate_backend: vllm
+      judge_backend: vllm
+      model_name: Qwen/Qwen3.8-27B-FP8
       dataset: alpaca_eval_gpt4_baseline
       max_instances: 300
       max_new_tokens: 256
-      judge_max_tokens: 100
+      judge_max_tokens: 512
+      judge_enable_thinking: false
       temperature: 0.0
       top_p: 1.0
-      model_kwargs:
-        tensor_parallel_size: 1
+      candidate_model_kwargs:
         gpu_memory_utilization: 0.9
-      client_kwargs: {}
+      judge_model_kwargs:
+        gpu_memory_utilization: 0.9
   params:
     batch_size: 32

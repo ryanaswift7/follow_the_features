@@ -250,7 +250,11 @@ class S2LConsensusEngine:
         # trajectories = np.zeros((len(ds), self.epochs), dtype=np.float32)
 
         # device = next(model.parameters()).device
-        trainer_args = generate_sft_trainer_args(suite=self.suite, output_dir=None)
+        trainer_args = generate_sft_trainer_args(
+            suite=self.suite,
+            output_dir=None,
+            num_training_examples=len(ds),
+        )
         trainer_args.remove_unused_columns=False
 
         trainer_kwargs = {

@@ -17,6 +17,7 @@ class SuiteDirs(BaseModel):
     base_model_id: str
     prune_cfg: PruneConfig
     sft_cfg: SFTConfig
+    active_seed: int | None = None
 
     # --- INTERNAL HELPERS ---
 
@@ -44,13 +45,13 @@ class SuiteDirs(BaseModel):
     @property # Just a property, not a computed field since it's private
     def _results_root(self) -> Path:
         return self.ensure_dir(
-            self.suite_root / "results" / self.ids.experiment # / self.timestamp
+            self.output_dir / "results" / self.suite_root.name / self.ids.experiment
         )
 
     @computed_field
     @property
     def main_results(self) -> Path:
-        return self.ensure_dir(self._results_root / "main")
+        return self.ensure_dir(self._results_root)
     
     @computed_field
     @property
@@ -68,6 +69,9 @@ class SuiteDirs(BaseModel):
     @property
     def base_model_eval(self) -> Path:
         return self.ensure_dir(self.base_model_root / self.ids.eval)
+
+    def get_base_model_eval_by_seed(self, seed: int) -> Path:
+        return self.ensure_dir(self.base_model_root / f"seed_{seed}" / self.ids.eval)
 
     @computed_field
     @property
@@ -108,6 +112,13 @@ class SuiteDirs(BaseModel):
             / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
         )
 
+    def get_base_model_gen_cache_by_seed(self, seed: int, max_new_tokens: int) -> Path:
+        return self.ensure_dir(
+            self.base_model_root
+            / f"seed_{seed}"
+            / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
+        )
+
     def get_ref_model_root_by_seed(self, seed: int) -> Path:
         return self.ensure_dir(self.reference_model_root / f"seed_{seed}")
 
@@ -143,16 +154,25 @@ class SuiteDirs(BaseModel):
         """
         name = Path(self.prune_cfg.dataset_id).name
         diversity_tag = getattr(self.prune_cfg, "diversity_tag", "divoff")
-        return self.ensure_dir(self.datasets / f"{name}_{diversity_tag}_ds{dataset_size}_topk{topk}.hf")
+        if self.active_seed is None:
+            raise ValueError("An active seed is required for dataset paths")
+        return self.ensure_dir(
+            self.datasets
+            / f"seed_{self.active_seed}"
+            / f"{name}_{diversity_tag}_ds{dataset_size}_topk{topk}.hf"
+        )
 
     def get_trained_model_root(self, dataset_size: int, topk: int) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
         diversity_tag = getattr(self.prune_cfg, "diversity_tag", "divoff")
+        if self.active_seed is None:
+            raise ValueError("An active seed is required for trained-model paths")
         return self.ensure_dir(
             self.models
             / "trained"
             / self.ids.prune
             / self.ids.sft
+            / f"seed_{self.active_seed}"
             / f"ds{dataset_size}_topk{topk}_{diversity_tag}_{name}"
         )
 

@@ -13,6 +13,7 @@ from src.utils.constants import (
     EVAL_CONFIG_FILENAME,
     EVAL_ID_KEY,
     EVAL_RESULTS_FILENAME,
+    has_current_eval_metrics,
     EVAL_RESULTS_KEY,
 )
 from src.utils.enums import ModelType
@@ -107,12 +108,6 @@ def verify_or_run_baseline(
     valid = False
     row = None
 
-    expected_sections = []
-    if run_lm_eval:
-        expected_sections.append("lm_eval_results")
-    if run_judge_eval:
-        expected_sections.append("reference_results")
-
     # 1. Validate existing config/results
     if os.path.exists(cfg_path) and os.path.exists(results_path):
         try:
@@ -121,9 +116,14 @@ def verify_or_run_baseline(
             with open(results_path, "r") as f:
                 res_data = json.load(f)
 
-            if cfg_data.get(EVAL_ID_KEY) == suite.ids.eval and all(
-                isinstance(res_data, dict) and res_data.get(section) is not None
-                for section in expected_sections
+            seed_matches = (
+                model_type != ModelType.BASE
+                or cfg_data.get("seed") == suite.active_seed
+            )
+            if (
+                cfg_data.get(EVAL_ID_KEY) == suite.ids.eval
+                and seed_matches
+                and has_current_eval_metrics(res_data, run_lm_eval, run_judge_eval)
             ):
                 valid = True
                 row = res_data
@@ -150,8 +150,10 @@ def verify_or_run_baseline(
             suite=suite,
             dataset_size=None,
             topk=None,
-            gen_cache_dir=suite.dirs.get_base_model_gen_cache(
-                max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens),
+            gen_cache_dir=suite.dirs.get_base_model_gen_cache_by_seed(
+                seed=suite.seed,
+                max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens,
+            ),
         )
 
         del model, tokenizer
@@ -189,12 +191,14 @@ def run_baseline_evals(suite: SuiteConfig):
             run_judge_eval=run_judge_eval,
         )
 
-    verify_or_run_baseline(
-        model_id=suite.sft.cfg.base_model_id,
-        model_type=ModelType.BASE,
-        eval_dir=suite.dirs.base_model_eval,
-        suite=suite,
-        run_lm_eval=run_lm_eval,
-        run_judge_eval=run_judge_eval,
-    )
+    for seed in suite.seeds:
+        seed_suite = suite.for_seed(seed)
+        verify_or_run_baseline(
+            model_id=seed_suite.sft.cfg.base_model_id,
+            model_type=ModelType.BASE,
+            eval_dir=seed_suite.dirs.get_base_model_eval_by_seed(seed),
+            suite=seed_suite,
+            run_lm_eval=run_lm_eval,
+            run_judge_eval=run_judge_eval,
+        )
     return

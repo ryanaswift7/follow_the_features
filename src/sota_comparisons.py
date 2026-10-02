@@ -348,7 +348,11 @@ def run_modern_comps(suite, base_dataset_id, grape_teacher_models, base_models, 
                 # 3. SFT Training
                 trainer = SFTTrainer(
                     model=model,
-                    args=generate_sft_trainer_args(suite=suite, output_dir=None),
+                    args=generate_sft_trainer_args(
+                        suite=suite,
+                        output_dir=None,
+                        num_training_examples=len(dataset),
+                    ),
                     train_dataset=dataset,
                     processing_class=tokenizer,
                     peft_config=PEFT_CONFIG,

@@ -1,6 +1,6 @@
 title: debug
 output_dir: debugging
-seed: 3
+seeds: [2, 3]
 debug_mode: true
 prune:
   cfg:
@@ -25,12 +25,12 @@ sft:
     base_model_id: google/gemma-3-1b-pt
     max_seq_length: 10
     learning_rate: 0.0002
-    max_original_samples: 2
+    lr_scheduler_type: cosine
+    full_ft: false
   params:
     batch_size: 2
 eval:
   cfg:
-    num_ref_models: 2
     lm_eval:
       run: true
       max_new_tokens: 2
@@ -39,19 +39,19 @@ eval:
       task_limit: 1
     alpacaeval:
       run: true
-      backend: vllm
-      model_name: google/gemma-3-4b-it
+      candidate_backend: vllm
+      judge_backend: vllm
+      model_name: Qwen/Qwen3.8-27B-FP8
       dataset: alpaca_eval_gpt4_baseline
       max_instances: 2
       max_new_tokens: 50
-      judge_max_tokens: 100
+      judge_max_tokens: 512
+      judge_enable_thinking: false
       temperature: 0.0
       top_p: 1.0
-      local_server_host: 127.0.0.1
-      local_server_port: 8000
-      model_kwargs:
-        tensor_parallel_size: 1
+      candidate_model_kwargs:
         gpu_memory_utilization: 0.9
-      client_kwargs: {}
+      judge_model_kwargs:
+        gpu_memory_utilization: 0.9
   params:
     batch_size: 1

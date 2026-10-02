@@ -1,5 +1,6 @@
 import gc
 import json
+import math
 import os
 import shutil
 from pathlib import Path
@@ -50,12 +51,15 @@ PEFT_CONFIG = LoraConfig(
 
 
 def generate_sft_trainer_args(
-    suite: SuiteConfig, output_dir: Optional[Union[str, Path]]
+    suite: SuiteConfig,
+    output_dir: Optional[Union[str, Path]],
+    num_training_examples: int,
 ):
     max_seq_length = suite.sft.cfg.max_seq_length
     learning_rate = suite.sft.cfg.learning_rate
     batch_size = suite.sft.params.batch_size
     seed = suite.seed
+    warmup_steps = max(1, math.ceil(0.03 * math.ceil(num_training_examples / batch_size)))
 
     return SFTConfig(
         output_dir=output_dir,
@@ -68,8 +72,8 @@ def generate_sft_trainer_args(
         learning_rate=learning_rate,
         weight_decay=0.01,
         max_grad_norm=0.3,
-        warmup_ratio=0.03,
-        lr_scheduler_type="cosine",
+        warmup_steps=warmup_steps,
+        lr_scheduler_type=suite.sft.cfg.lr_scheduler_type,
         bf16=True,
         logging_steps=10,
         save_strategy="epoch",
@@ -118,7 +122,11 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     # Base trainer arguments
     trainer_kwargs = {
         "model": model,
-        "args": generate_sft_trainer_args(suite=suite, output_dir=output_dir),
+        "args": generate_sft_trainer_args(
+            suite=suite,
+            output_dir=output_dir,
+            num_training_examples=len(dataset),
+        ),
         "train_dataset": dataset,
         "processing_class": tokenizer,
     }
@@ -146,6 +154,7 @@ def run_sft(suite: SuiteConfig, dataset_size: int, topk: int):
     model_cfg = {
         PRUNE_ID_KEY: suite.ids.prune,
         SFT_ID_KEY: suite.ids.sft,
+        "seed": suite.active_seed,
     }
     with open(model_cfg_path, "w") as f:
         json.dump(model_cfg, f, indent=4)
