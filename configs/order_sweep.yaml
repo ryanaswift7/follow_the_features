@@ -14,7 +14,7 @@ prune:
     divide_by_entropy: true
     diversity_param: null
   params:
-    batch_size: 8
+    batch_size: 32
     dataset_sizes:
     - 51760
     topk_features:
@@ -34,7 +34,7 @@ sft:
     lr_scheduler_type: cosine
     full_ft: false
   params:
-    batch_size: 2
+    batch_size: 32
 eval:
   cfg:
     lm_eval:
@@ -57,8 +57,11 @@ eval:
       top_p: 1.0
       candidate_model_kwargs:
         gpu_memory_utilization: 0.9
+        max_model_len: 8192
       judge_model_kwargs:
         gpu_memory_utilization: 0.9
+        max_model_len: 8192
+
     # alpacaeval:
     #   run: true
     #   candidate_backend: huggingface

@@ -14,7 +14,7 @@ prune:
     divide_by_entropy: true
     diversity_param: 0.2
   params:
-    batch_size: 8
+    batch_size: 32
     dataset_sizes:
     - 10
     - 100
@@ -40,7 +40,7 @@ sft:
     lr_scheduler_type: cosine
     full_ft: false
   params:
-    batch_size: 2
+    batch_size: 32
 eval:
   cfg:
     lm_eval:
@@ -63,7 +63,9 @@ eval:
       top_p: 1.0
       candidate_model_kwargs:
         gpu_memory_utilization: 0.9
+        max_model_len: 8192
       judge_model_kwargs:
         gpu_memory_utilization: 0.9
+        max_model_len: 8192
   params:
     batch_size: 32
