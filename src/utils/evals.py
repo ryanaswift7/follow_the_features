@@ -248,6 +248,8 @@ def run_phase4_judge_evaluation(
     dataset_size,
     topk,
     ref_model_seed: Optional[int] = None,
+    sota_model_path: Optional[str] = None,
+    sota_eval_output_dir: Optional[Path] = None,
 ) -> Dict:
     """Phase 2: AlpacaEval evaluation with separate generation and judging stages."""
     if not suite.eval.cfg.alpacaeval.run:
@@ -278,6 +280,11 @@ def run_phase4_judge_evaluation(
             raise ValueError("ref_model_seed must be provided for reference model judge evaluation.")
         model_path = suite.dirs.get_ref_model_root_by_seed(ref_model_seed).as_posix()
         eval_output_dir = suite.dirs.get_ref_model_eval_by_seed(ref_model_seed)
+    elif model_type == ModelType.SOTA:
+        if sota_model_path is None or sota_eval_output_dir is None:
+            raise ValueError("SOTA judge evaluation requires an explicit model and output path")
+        model_path = sota_model_path
+        eval_output_dir = sota_eval_output_dir
     else:
         raise ValueError(
             f"Invalid model type {model_type.value.upper()} for judge evaluation."
@@ -343,6 +350,8 @@ def eval_and_save(
     topk: Optional[int] = None,
     save_results_and_config: bool = True,
     ref_model_seed: Optional[int] = None,
+    sota_model_path: Optional[str] = None,
+    sota_eval_output_dir: Optional[Path] = None,
 ) -> Tuple[dict, Optional[dict]]:
 
     print("CHANGING PADDING SIDE TO 'left' FOR INFERENCE")
@@ -392,6 +401,8 @@ def eval_and_save(
             dataset_size=dataset_size,
             topk=topk,
             ref_model_seed=ref_model_seed,
+            sota_model_path=sota_model_path,
+            sota_eval_output_dir=sota_eval_output_dir,
         )
     else:
         print("AlpacaEval disabled in suite config. Skipping Phase 2.")

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "evaluate>=0.4.6",
+    "datasets>=4.0.0",
     "peft>=0.18.1",
     "pillow>=12.1.0",
     "rouge-score>=0.1.2",
@@ -41,4 +42,6 @@ explicit = true
 fdp = "src.main:main"
 gen-ref-models = "src.reference_models:main"
 gen-sni-data = "src.utils.sni_data_gen:main"
+gen-dolci-subset = "src.utils.dolci_subset:main"
 sota-comps = "src.sota_comparisons:main"
+grape-s2l = "src.grape_s2l:main"

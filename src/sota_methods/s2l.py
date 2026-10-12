@@ -1,411 +1,214 @@
-from src.sft import PEFT_CONFIG, generate_sft_trainer_args
-from src.schemas.suite import SuiteConfig
-from src.prune import get_formatting_function
-import torch
+"""Canonical SmallToLarge (S2L) data selection.
+
+The paper's reference implementation trains a proxy, evaluates the whole
+dataset at frozen checkpoints, clusters the resulting loss trajectories, and
+allocates a budget across clusters in ascending cluster-size order.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from pathlib import Path
+
+import faiss
 import numpy as np
-import math
-import faiss  
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from sklearn.preprocessing import StandardScaler
-from collections import Counter
-from tqdm import tqdm
-from torch.nn import CrossEntropyLoss
-from torch.optim import AdamW
-from src.utils.ensure_pad_token import ensure_pad_token
-from trl.trainer.sft_trainer import SFTTrainer
-from huggingface_hub import HfApi
-from datasets import get_dataset_config_names
+import torch
 
 
-class TrajectorySFTTrainer(SFTTrainer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
-        self.num_samples = len(self.train_dataset)
-        self.num_epochs = int(self.args.num_train_epochs)
-        
-        # 2. Initialize trajectory matrix directly on the single training GPU
-        self.trajectories = torch.zeros(
-            (self.num_samples, self.num_epochs),
-            device=self.args.device, 
-            dtype=torch.float32
+def allocate_s2l_indices(
+    cluster_labels: Sequence[int],
+    budget: int,
+    rng: np.random.Generator | None = None,
+) -> list[int]:
+    """Select exactly ``budget`` points using S2L Algorithm 1.
+
+    Clusters are processed from smallest to largest.  The dynamic quota is
+    ``(budget - selected) / remaining_clusters``; this is what makes S2L
+    preferentially retain small clusters instead of treating every cluster as
+    having the same population.
+    """
+    labels = np.asarray(cluster_labels)
+    if labels.ndim != 1:
+        raise ValueError("cluster_labels must be one-dimensional")
+    if not 0 <= budget <= len(labels):
+        raise ValueError(f"budget must be in [0, {len(labels)}], got {budget}")
+    if budget == 0:
+        return []
+
+    rng = rng or np.random.default_rng()
+    clusters = [
+        np.flatnonzero(labels == label)
+        for label in np.unique(labels)
+    ]
+    clusters.sort(key=len)
+
+    selected: list[int] = []
+    for position, cluster in enumerate(clusters):
+        remaining_clusters = len(clusters) - position
+        quota = (budget - len(selected)) // remaining_clusters
+        if len(cluster) <= quota:
+            selected.extend(int(index) for index in cluster)
+        elif quota:
+            chosen = rng.choice(cluster, size=quota, replace=False)
+            selected.extend(int(index) for index in chosen)
+
+    if len(selected) != budget:
+        # Integer division can leave a remainder.  Fill it uniformly from the
+        # not-yet-selected points, preserving the requested exact budget.
+        selected_set = set(selected)
+        available = np.asarray(
+            [index for index in range(len(labels)) if index not in selected_set]
         )
-
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        sample_indices = inputs.pop("sample_idx", None)
-        labels = inputs.pop("labels", None)
-        
-        outputs = model(**inputs)
-        logits = outputs.get("logits")
-        
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
-        
-        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-        token_losses = loss_fct(
-            shift_logits.view(-1, shift_logits.size(-1)), 
-            shift_labels.view(-1)
-        )
-        token_losses = token_losses.view(shift_logits.size(0), shift_logits.size(1))
-        
-        mask = (shift_labels != -100).float()
-        per_sample_loss = (token_losses * mask).sum(dim=1) / mask.sum(dim=1)
-        
-        # 3. Update tracking matrix (100% On-Device)
-        if sample_indices is not None:
-            current_epoch = math.floor(self.state.epoch) 
-            
-            if current_epoch < self.num_epochs:
-                # Direct GPU-to-GPU assignment
-                self.trajectories[sample_indices, current_epoch] = per_sample_loss.detach().float()
-
-        loss = per_sample_loss.mean()
-        
-        return (loss, outputs) if return_outputs else loss
-    
-
-class S2LConsensusEngine:
-    def __init__(
-        self, 
-        suite: SuiteConfig,
-        dataset_name: str, 
-        hub_repo_id: str, 
-        proxy_models: list[str], 
-        proxy_tokenizers: list[str],
-        ratio: float, 
-        batch_size: int, 
-        split: str,
-        epochs: int =3, 
-        max_length: int =256,
-        sample_limit: int=None
-    ):
-        """
-        Initializes the Consensus Engine following the true S2L methodology.
-        """
-        self.dataset_name = dataset_name
-        self.hub_repo_id = hub_repo_id
-        self.proxies = proxy_models
-        self.proxy_tokenizers = proxy_tokenizers
-        self.ratio = ratio
-        self.epochs = epochs
-        self.batch_size = batch_size
-        self.max_length = max_length
-        self.suite = suite
-        self.split = split
-        
-        self.raw_dataset = load_dataset(dataset_name, split=self.split)
-        self.raw_dataset = self.raw_dataset.select(range(suite.prune.cfg.num_samples))
-        
-        if sample_limit is not None:
-            limit = min(sample_limit, len(self.raw_dataset))
-            self.raw_dataset = self.raw_dataset.select(range(limit))
-            print(f"🐛 Debug mode enabled: Dataset truncated to {limit} samples.")
-            
-        self.all_proxy_indices = {}
-
-    def _tokenize_with_assistant_labels(self, tokenizer, messages):
-        """
-        Masks everything except the final assistant response.
-        Works best when each example is a chat transcript ending with an assistant turn.
-        """
-        # Full conversation
-        full_text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-
-        # Everything up to the assistant response
-        prompt_text = tokenizer.apply_chat_template(
-            messages[:-1],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-
-        # Prompt length before padding
-        prompt_ids = tokenizer(
-            prompt_text,
-            truncation=True,
-            max_length=self.max_length,
-            add_special_tokens=False,
-            padding=False,
-        )["input_ids"]
-
-        # Full sequence with padding
-        full = tokenizer(
-            full_text,
-            truncation=True,
-            max_length=self.max_length,
-            add_special_tokens=False,
-            padding="max_length",
-        )
-
-        input_ids = full["input_ids"]
-        attention_mask = full["attention_mask"]
-
-        labels = input_ids.copy()
-        prompt_len = min(len(prompt_ids), self.max_length)
-        labels[:prompt_len] = [-100] * prompt_len
-
-        # Mask padding too
-        for i, m in enumerate(attention_mask):
-            if m == 0:
-                labels[i] = -100
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-        }
+        extra = rng.choice(available, size=budget - len(selected), replace=False)
+        selected.extend(int(index) for index in extra)
+    return selected
 
 
-    def _per_sample_loss(self, logits, labels):
-        """
-        Computes mean loss per sequence, ignoring labels == -100.
-        """
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
+def cluster_trajectories(
+    trajectories: np.ndarray | torch.Tensor,
+    n_clusters: int,
+    seed: int,
+) -> np.ndarray:
+    """Cluster raw loss trajectories with the reference FAISS procedure."""
+    values = np.asarray(trajectories, dtype=np.float32)
+    if values.ndim != 2:
+        raise ValueError("trajectories must have shape [num_examples, num_checkpoints]")
+    if len(values) == 0:
+        return np.empty(0, dtype=np.int64)
+    n_clusters = min(n_clusters, len(values))
+    if n_clusters == 1:
+        return np.zeros(len(values), dtype=np.int64)
 
-        loss_fct = CrossEntropyLoss(reduction="none", ignore_index=-100)
-        token_loss = loss_fct(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-        )
-        token_loss = token_loss.view(shift_labels.size(0), -1)
+    # The paper/reference implementation clusters the loss values directly.
+    # Do not standardize columns: that changes the trajectory distance metric.
+    kmeans = faiss.Kmeans(
+        d=values.shape[1],
+        k=n_clusters,
+        niter=20,
+        nredo=10,
+        seed=seed,
+        verbose=False,
+        gpu=torch.cuda.is_available(),
+    )
+    kmeans.train(values)
+    _, assignments = kmeans.index.search(values, 1)
+    return assignments[:, 0].astype(np.int64)
 
-        valid_mask = (shift_labels != -100).float()
-        denom = valid_mask.sum(dim=1).clamp(min=1.0)
 
-        return (token_loss * valid_mask).sum(dim=1) / denom
+def select_s2l(
+    trajectories: np.ndarray | torch.Tensor,
+    budget: int,
+    n_clusters: int,
+    seed: int,
+    sources: Sequence[str] | None = None,
+) -> list[int]:
+    """Select a canonical S2L subset, clustering each source independently."""
+    values = np.asarray(trajectories, dtype=np.float32)
+    if budget > len(values):
+        raise ValueError(f"S2L budget {budget} exceeds dataset size {len(values)}")
+    rng = np.random.default_rng(seed)
 
-    def _get_trajectories(self, model_name, tokenizer_name):
-        """Records authentic training loss trajectories by actively training the proxy."""
+    if sources is None:
+        labels = cluster_trajectories(values, n_clusters, seed)
+        return allocate_s2l_indices(labels, budget, rng)
 
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        model, tokenizer = ensure_pad_token(model, tokenizer)
+    source_values = np.asarray(sources)
+    if len(source_values) != len(values):
+        raise ValueError("sources and trajectories must have the same length")
 
-        # if tokenizer.pad_token is None:
-        #     tokenizer.pad_token = tokenizer.eos_token
+    # Source-aware clustering is performed independently.  The global
+    # allocation then applies the same smallest-cluster-first rule across all
+    # source clusters, as in the paper's source-wise extension.
+    cluster_groups: list[np.ndarray] = []
+    for source in np.unique(source_values):
+        indices = np.flatnonzero(source_values == source)
+        local_labels = cluster_trajectories(values[indices], n_clusters, seed)
+        cluster_groups.extend(indices[local_labels == label] for label in np.unique(local_labels))
 
-        if tokenizer.chat_template is None:
-            raise ValueError(
-                f"Tokenizer for '{model_name}' does not have a chat_template. "
-                f"Please use an instruction-tuned proxy model or manually set a template."
+    cluster_groups.sort(key=len)
+    labels = np.full(len(values), -1, dtype=np.int64)
+    for cluster_id, indices in enumerate(cluster_groups):
+        labels[indices] = cluster_id
+    return allocate_s2l_indices(labels, budget, rng)
+
+
+def collect_checkpoint_trajectories(
+    model,
+    tokenizer,
+    dataset,
+    checkpoint_paths: Sequence[str | Path],
+    max_length: int,
+    batch_size: int,
+    device: str | torch.device | None = None,
+) -> torch.Tensor:
+    """Evaluate every example at every frozen proxy checkpoint.
+
+    ``model`` is reused to avoid repeatedly allocating the proxy.  Every
+    trajectory column is computed from one complete frozen checkpoint, unlike
+    online per-example losses collected during training.
+    """
+    device = device or next(model.parameters()).device
+    encoded = [_encode_messages(tokenizer, item["messages"], max_length) for item in dataset]
+    trajectories = torch.empty((len(encoded), len(checkpoint_paths)), dtype=torch.float32)
+
+    for checkpoint_index, checkpoint_path in enumerate(checkpoint_paths):
+        state_path = Path(checkpoint_path) / "model_state.pt"
+        if not state_path.exists():
+            raise FileNotFoundError(
+                f"Missing frozen proxy checkpoint state: {state_path}"
             )
-
-        # def tokenize_batch(batch):
-        #     examples = [
-        #         self._tokenize_with_assistant_labels(tokenizer, messages)
-        #         for messages in batch["messages"]
-        #     ]
-        #     return {
-        #         "input_ids": [ex["input_ids"] for ex in examples],
-        #         "attention_mask": [ex["attention_mask"] for ex in examples],
-        #         "labels": [ex["labels"] for ex in examples],
-        #     }
-
-        # ds = self.raw_dataset.map(tokenize_batch, batched=True, remove_columns=self.raw_dataset.column_names)
-        # ds.set_format("torch")
-        formatter_func = get_formatting_function(self.dataset_name)
-
-        str_dataset = self.raw_dataset.map(
-            lambda examples: formatter_func(tokenizer, examples, is_inference=False),
-            batched=True,
-            batch_size=1000,  # batch_size,
-            num_proc=12,
-        )
-        ds = str_dataset.map(
-            lambda example, idx: {"sample_idx": idx}, 
-            with_indices=True
-        )
-        ds = ds.remove_columns(
-            [c for c in ds.column_names if c != "messages"]
-        )
-
-        # tokenized_dataset = str_dataset.map(
-        #     lambda examples: tokenizer(
-        #         examples["text"],
-        #         padding="max_length",
-        #         truncation=True,
-        #         max_length=self.max_length,
-        #         return_tensors=None 
-        #     ),
-        #     batched=True,
-        #     batch_size=1000,
-        #     num_proc=12,
-        #     remove_columns=str_dataset.column_names 
-        # )
-        # tokenized_dataset.set_format(type="torch", columns=["input_ids"])
+        state = torch.load(state_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state, strict=True)
+        model.to(device).eval()
+        for start in range(0, len(encoded), batch_size):
+            batch = _collate(encoded[start : start + batch_size], tokenizer)
+            batch = {key: value.to(device) for key, value in batch.items()}
+            with torch.no_grad():
+                logits = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                ).logits
+            trajectories[start : start + len(batch["input_ids"]), checkpoint_index] = _losses(
+                logits, batch["labels"]
+            ).cpu()
+    return trajectories
 
 
-        # loader = torch.utils.data.DataLoader(ds, batch_size=self.batch_size, shuffle=False)
+def _encode_messages(tokenizer, messages, max_length):
+    full = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    prompt = tokenizer.apply_chat_template(messages[:-1], tokenize=False, add_generation_prompt=True)
+    full_ids = tokenizer(full, add_special_tokens=False, truncation=True, max_length=max_length)["input_ids"]
+    prompt_ids = tokenizer(prompt, add_special_tokens=False, truncation=True, max_length=max_length)["input_ids"]
+    labels = list(full_ids)
+    for index in range(min(len(prompt_ids), len(labels))):
+        labels[index] = -100
+    return {"input_ids": full_ids, "labels": labels}
 
-        # optimizer = AdamW(model.parameters(), lr=5e-5)
-        # trajectories = np.zeros((len(ds), self.epochs), dtype=np.float32)
 
-        # device = next(model.parameters()).device
-        trainer_args = generate_sft_trainer_args(
-            suite=self.suite,
-            output_dir=None,
-            num_training_examples=len(ds),
-        )
-        trainer_args.remove_unused_columns=False
+def _collate(examples, tokenizer):
+    width = max(len(example["input_ids"]) for example in examples)
+    pad = tokenizer.pad_token_id or 0
+    input_ids, labels, masks = [], [], []
+    for example in examples:
+        padding = width - len(example["input_ids"])
+        input_ids.append(example["input_ids"] + [pad] * padding)
+        labels.append(example["labels"] + [-100] * padding)
+        masks.append([1] * (width - padding) + [0] * padding)
+    return {
+        "input_ids": torch.tensor(input_ids),
+        "labels": torch.tensor(labels),
+        "attention_mask": torch.tensor(masks),
+    }
 
-        trainer_kwargs = {
-            "model": model,
-            "args": trainer_args,
-            "train_dataset": ds,
-            "processing_class": tokenizer,
-            "peft_config": PEFT_CONFIG,
-        }
 
-        trainer = TrajectorySFTTrainer(**trainer_kwargs)
-
-        trainer.train()
-
-        # for e in range(self.epochs):
-        #     curr = 0
-        #     model.train()
-
-        #     for batch in tqdm(loader, desc=f"📉 {model_name} | Epoch {e}"):
-        #         batch = {k: v.to(device) for k, v in batch.items()}
-
-        #         outputs = model(
-        #             input_ids=batch["input_ids"],
-        #             attention_mask=batch["attention_mask"],
-        #         )
-        #         logits = outputs.logits
-
-        #         per_sample_loss = self._per_sample_loss(logits, batch["labels"])
-
-        #         batch_size_actual = per_sample_loss.size(0)
-        #         trajectories[curr:curr + batch_size_actual, e] = per_sample_loss.detach().cpu().numpy()
-
-        #         batch_loss = per_sample_loss.mean()
-        #         batch_loss.backward()
-        #         optimizer.step()
-        #         optimizer.zero_grad()
-
-        #         curr += batch_size_actual
-
-        del model
-        # del optimizer
-        torch.cuda.empty_cache()
-
-        return trainer.trajectories.cpu()
-
-    def _select_from_trajectories(self, traj):
-        """Authentic S2L logic: Cluster trajectories and sample uniformly from within them."""
-        scaled = StandardScaler().fit_transform(traj).astype(np.float32)
-        
-        # The S2L paper clusters trajectories into a fixed number of groups (e.g., 10)
-        n_clusters = 10 
-        d = scaled.shape[1] 
-        
-        kmeans = faiss.Kmeans(d=d, k=n_clusters, niter=20, nredo=10, verbose=False, gpu=True)
-        kmeans.train(scaled)
-        
-        # Get cluster assignments for every sample in the dataset
-        _, I = kmeans.index.search(scaled, 1)
-        cluster_labels = I.flatten()
-        
-        target_size = max(1, int(len(traj) * self.ratio))
-        samples_per_cluster = target_size // n_clusters
-        
-        selected_indices = set()
-        
-        # Sample uniformly from each cluster
-        for i in range(n_clusters):
-            cluster_idx = np.where(cluster_labels == i)[0]
-            if len(cluster_idx) > 0:
-                replace = len(cluster_idx) < samples_per_cluster
-                sampled = np.random.choice(cluster_idx, min(samples_per_cluster, len(cluster_idx)), replace=replace)
-                selected_indices.update(sampled.tolist())
-                
-        # Pad randomly if integer division left us slightly short
-        remaining = target_size - len(selected_indices)
-        if remaining > 0:
-            available = list(set(range(len(traj))) - selected_indices)
-            if available:
-                pad_samples = np.random.choice(available, remaining, replace=False)
-                selected_indices.update(pad_samples.tolist())
-                
-        return selected_indices
-
-    def run(self):
-        """Executes the multi-proxy S2L selection and pushes consensus to Hub."""
-        api = HfApi()
-        
-        # 1. Check if the repository exists on the Hub
-        repo_exists = api.repo_exists(repo_id=self.hub_repo_id, repo_type="dataset")
-        existing_configs = []
-        
-        if repo_exists:
-            try:
-                # 2. Fetch all existing configurations (subsets) in the repo
-                existing_configs = get_dataset_config_names(self.hub_repo_id)
-            except Exception:
-                # Catch exceptions if the repo was just created but is completely empty
-                existing_configs = []
-
-        for p, t in zip(self.proxies, self.proxy_tokenizers):
-            config_name = p.split("/")[-1].replace("-", "_")
-            
-            # 3. Skip if the repo and config already exist
-            if repo_exists and config_name in existing_configs:
-                print(f"Skipping {p}: Config '{config_name}' already exists in '{self.hub_repo_id}'.")
-                
-                # NOTE: Because we are skipping the computation, self.all_proxy_indices[p] 
-                # won't be populated. If your pipeline relies on this dictionary later, 
-                # you will need to load the indices from the Hub here.
-                continue
-                
-            print(f"Processing {p} into config '{config_name}'...")
-            traj = self._get_trajectories(p, t)
-            selected_set = self._select_from_trajectories(traj)
-            self.all_proxy_indices[p] = selected_set
-            
-            self.raw_dataset.select(list(selected_set)).push_to_hub(
-                self.hub_repo_id, 
-                config_name=config_name
-            )
-            
-            # 4. Update local state so subsequent loop iterations know the repo/config now exists
-            repo_exists = True
-            existing_configs.append(config_name)
-
-        # --- Consensus Logic ---
-        # all_votes = []
-        # for idx_set in self.all_proxy_indices.values():
-        #     all_votes.extend(list(idx_set))
-        
-        # vote_counts = Counter(all_votes)
-        # target_size = max(1, int(len(self.raw_dataset) * self.ratio))
-        
-        # consensus_indices = [idx for idx, count in vote_counts.most_common(target_size)]
-        
-        # print(f"👑 Consensus reached with {len(self.proxies)} proxies!")
-        # consensus_ds = self.raw_dataset.select(consensus_indices)
-        # consensus_ds.push_to_hub(self.hub_repo_id, config_name="s2l_consensus")
-
-# # --- Usage ---
-# if __name__ == "__main__":
-#     engine = S2LConsensusEngine(
-#         dataset_name="allenai/tulu-3-sft-mixture", 
-#         hub_repo_id="your-hf-username/s2l-tulu-3-sft",
-#         proxies=[
-#             "Qwen/Qwen1.5-0.5B-Chat", # Swapped to a model with a chat template
-#             "HuggingFaceTB/SmolLM-135M-Instruct" # Swapped to a model with a chat template
-#         ],
-#         ratio=0.1,
-#         batch_size=8,
-#         epochs=2
-#     )
-    
-#     engine.run()
+def _losses(logits, labels):
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    losses = torch.nn.functional.cross_entropy(
+        shift_logits.view(-1, shift_logits.shape[-1]),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).view(shift_labels.shape)
+    mask = shift_labels.ne(-100)
+    return (losses * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1)

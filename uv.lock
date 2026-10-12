@@ -1017,6 +1017,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alpaca-eval" },
+    { name = "datasets" },
     { name = "evaluate" },
     { name = "faiss-cpu" },
     { name = "immutabledict" },
@@ -1039,6 +1040,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alpaca-eval", specifier = "==0.6.6" },
+    { name = "datasets", specifier = ">=4.0.0" },
     { name = "evaluate", specifier = ">=0.4.6" },
     { name = "faiss-cpu", specifier = ">=1.13.2" },
     { name = "immutabledict", specifier = ">=4.3.1" },

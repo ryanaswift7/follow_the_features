@@ -32,6 +32,39 @@ Or use a larger config such as:
 uv run fdp --config configs/base_full_gemma3.yaml
 ```
 
+Run a direct GRAPE/S2L comparison with a separate SOTA configuration:
+
+```bash
+uv run grape-s2l -c configs/methodology.yaml -s configs/sota/sota.yaml
+```
+
+Create and push a reproducible 100,000-example subset of
+`allenai/Dolci-Instruct-SFT-No-Tools`:
+
+```bash
+hf auth login
+uv run gen-dolci-subset
+```
+
+The default destination is
+`ryanaswift7/dolci-instruct-sft-no-tools-100k`, using seed `1234`. Override
+the destination, sample count, or seed as needed:
+
+```bash
+uv run gen-dolci-subset \
+  --repo-id YOUR_USERNAME/dolci-subset \
+  --num-samples 100000 \
+  --seed 1234
+```
+
+Pass `--private` to create a private destination dataset.
+
+The comparison budgets are taken from `prune.params.dataset_sizes`. GRAPE
+selects at most one response per unique instruction and fails if a requested
+budget is larger than that instruction count. The SOTA configuration specifies
+the dataset, GRAPE teachers, one canonical S2L proxy, trajectory checkpoints,
+and the S2L cluster count.
+
 ## Repository Layout
 
 - `src/main.py` - suite runner and experiment orchestration

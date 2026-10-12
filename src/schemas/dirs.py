@@ -77,7 +77,7 @@ class SuiteDirs(BaseModel):
     @property
     def reference_model_root(self) -> Path:
         name = Path(self.sft_cfg.base_model_id).name
-        return self.ensure_dir(self.models / "reference_models" / name)
+        return self.ensure_dir(self.models / "reference_models" / name / self.ids.sft)
 
     @computed_field
     @property

@@ -60,6 +60,10 @@ def _resolve_model_config_identity(
             raise ValueError("dataset_size and topk must be provided for adapter AlpacaEval configs.")
         diversity_tag = getattr(suite.prune.cfg, "diversity_tag", "divoff")
         model_key = f"fdp_adapter_ds{dataset_size}_topk{topk}_{diversity_tag}_{base_model_slug}"
+    elif kind == "sota":
+        if dataset_size is None:
+            raise ValueError("dataset_size must be provided for SOTA AlpacaEval configs.")
+        model_key = f"fdp_sota_ds{dataset_size}_{base_model_slug}"
     else:
         raise ValueError(f"Unsupported model_type: {model_type!r}")
 

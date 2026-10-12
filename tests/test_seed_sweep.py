@@ -4,9 +4,15 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 
 import pandas as pd
+from datasets import Dataset
 
 from src.analysis import _mean_numeric_dicts
 from src.analysis import write_manifest
+from src.reference_models import (
+    _cache_config_matches,
+    _reference_model_manifest_matches,
+    _sample_reference_dataset,
+)
 from src.schemas.suite import SuiteConfig
 from src.schemas.sft import SFTConfig
 from src.sft import generate_sft_trainer_args
@@ -57,6 +63,16 @@ class SeedSweepTests(unittest.TestCase):
             second = suite.for_seed(suite.seeds[1]).dirs.get_trained_model_root(2, 10)
             self.assertNotEqual(first, second)
             self.assertIn("seed_", first.as_posix())
+
+    def test_reference_paths_are_indexed_by_sft_id(self):
+        suite = SuiteConfig.from_yaml("configs/debug.yaml")
+        with TemporaryDirectory() as output_dir:
+            suite = suite.model_copy(update={"output_dir": Path(output_dir)})
+            reference_path = suite.dirs.get_ref_model_root_by_seed(suite.seeds[0])
+
+            self.assertEqual(reference_path.parent.name, suite.ids.sft)
+            self.assertIn("reference_models", reference_path.parts)
+            self.assertIn(f"seed_{suite.seeds[0]}", reference_path.parts)
 
     def test_nested_scores_are_averaged(self):
         result = _mean_numeric_dicts(
@@ -143,6 +159,73 @@ class SeedSweepTests(unittest.TestCase):
                     "lr_scheduler_type": "not-a-scheduler",
                 }
             )
+
+    def test_reference_cache_requires_matching_sft_id(self):
+        suite = SuiteConfig.from_yaml("configs/debug.yaml")
+        cache_config = {"eval_id": suite.ids.eval, "sft_id": suite.ids.sft}
+
+        self.assertTrue(_cache_config_matches(cache_config, suite))
+        self.assertTrue(
+            _cache_config_matches(
+                {**cache_config, "seed": suite.seeds[0]},
+                suite,
+                seed=suite.seeds[0],
+            )
+        )
+        self.assertFalse(
+            _cache_config_matches(
+                {**cache_config, "sft_id": "sft_stale"},
+                suite,
+            )
+        )
+        self.assertFalse(
+            _cache_config_matches(
+                {**cache_config, "seed": suite.seeds[0]},
+                suite,
+                seed=suite.seeds[1],
+            )
+        )
+
+    def test_reference_model_manifest_requires_matching_sft_id(self):
+        suite = SuiteConfig.from_yaml("configs/debug.yaml")
+        with TemporaryDirectory() as output_dir:
+            model_dir = Path(output_dir)
+            manifest_path = model_dir / "reference_manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "model_type": "reference",
+                        "base_model_id": suite.sft.cfg.base_model_id,
+                        "seed": suite.seeds[0],
+                        "sft_id": suite.ids.sft,
+                    }
+                )
+            )
+
+            self.assertTrue(
+                _reference_model_manifest_matches(model_dir, suite, suite.seeds[0])
+            )
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "model_type": "reference",
+                        "base_model_id": suite.sft.cfg.base_model_id,
+                        "seed": suite.seeds[0],
+                        "sft_id": "sft_stale",
+                    }
+                )
+            )
+            self.assertFalse(
+                _reference_model_manifest_matches(model_dir, suite, suite.seeds[0])
+            )
+
+    def test_reference_dataset_is_shuffled_before_sampling(self):
+        raw_dataset = Dataset.from_dict({"id": list(range(20))})
+        sampled = _sample_reference_dataset(raw_dataset, num_samples=5, seed=7)
+        expected = raw_dataset.shuffle(seed=7).select(range(5))
+
+        self.assertEqual(sampled["id"], expected["id"])
+        self.assertNotEqual(sampled["id"], list(range(5)))
 
     def test_fine_tuning_mode_is_required(self):
         suite = SuiteConfig.from_yaml("configs/debug.yaml")

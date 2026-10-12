@@ -14,6 +14,7 @@ from src.sft import PEFT_CONFIG, generate_sft_trainer_args
 from src.utils.constants import (
     EVAL_CONFIG_FILENAME,
     EVAL_RESULTS_FILENAME,
+    REFERENCE_MANIFEST_FILENAME,
     has_current_eval_metrics,
 )
 from src.utils.enums import ModelType
@@ -62,6 +63,51 @@ def _mean_numeric_dicts(dicts: list[dict[str, Any]]) -> dict[str, Any]:
     return aggregated
 
 
+def _cache_config_matches(
+    cfg: dict[str, Any], suite: SuiteConfig, seed: int | None = None
+) -> bool:
+    if cfg.get("eval_id") != suite.ids.eval or cfg.get("sft_id") != suite.ids.sft:
+        return False
+    return seed is None or cfg.get("seed") == seed
+
+
+def _reference_model_manifest_matches(
+    trial_output_dir, suite: SuiteConfig, seed: int
+) -> bool:
+    manifest_path = trial_output_dir / REFERENCE_MANIFEST_FILENAME
+    try:
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    return (
+        manifest.get("model_type") == ModelType.REFERENCE.value
+        and manifest.get("base_model_id") == suite.sft.cfg.base_model_id
+        and manifest.get("sft_id") == suite.ids.sft
+        and manifest.get("seed") == seed
+    )
+
+
+def _write_reference_model_manifest(trial_output_dir, suite: SuiteConfig, seed: int) -> None:
+    manifest = {
+        "model_type": ModelType.REFERENCE.value,
+        "base_model_id": suite.sft.cfg.base_model_id,
+        "seed": seed,
+        "sft_id": suite.ids.sft,
+        "sft_config": suite.sft.cfg.model_dump(),
+    }
+    with open(trial_output_dir / REFERENCE_MANIFEST_FILENAME, "w") as f:
+        json.dump(manifest, f, indent=4)
+
+
+def _sample_reference_dataset(raw_dataset, num_samples: int | None, seed: int):
+    dataset = raw_dataset.shuffle(seed=seed)
+    if num_samples is not None and num_samples < len(dataset):
+        dataset = dataset.select(range(num_samples))
+    return dataset
+
+
 def _trial_has_valid_results(
     trial_output_dir, suite: SuiteConfig, expected_sections: list[str], seed: int
 ) -> bool:
@@ -78,7 +124,10 @@ def _trial_has_valid_results(
     except (json.JSONDecodeError, OSError):
         return False
 
-    if cfg.get("eval_id") != suite.ids.eval or cfg.get("seed") != seed:
+    if not _reference_model_manifest_matches(trial_output_dir, suite, seed):
+        return False
+
+    if not _cache_config_matches(cfg, suite, seed=seed):
         return False
 
     return has_current_eval_metrics(
@@ -127,8 +176,14 @@ def generate_reference_models(
             with open(overall_config_path, "r") as f:
                 cfg = json.load(f)
             if (
-                cfg.get("eval_id") == suite.ids.eval
+                _cache_config_matches(cfg, suite)
                 and cfg.get("seeds") == configured_seeds
+                and all(
+                    _reference_model_manifest_matches(
+                        suite.dirs.get_ref_model_root_by_seed(seed), suite, seed
+                    )
+                    for seed in configured_seeds
+                )
                 and has_current_eval_metrics(final_results, run_lm_eval, run_judge_eval)
             ):
                 print("[REF MODELS] Cached aggregate reference results found. Skipping generation.")
@@ -152,10 +207,12 @@ def generate_reference_models(
         if suite.debug_mode:
             raw_full_ds = raw_full_ds.select(range(1))
 
-        if suite.prune.cfg.num_samples is not None and suite.prune.cfg.num_samples < len(raw_full_ds):
-            raw_full_ds = raw_full_ds.select(range(suite.prune.cfg.num_samples))
-
-        full_ds_len = len(raw_full_ds)
+        requested_size = (
+            suite.prune.cfg.num_samples
+            if suite.prune.cfg.num_samples is not None
+            else len(raw_full_ds)
+        )
+        full_ds_len = min(requested_size, len(raw_full_ds))
         if full_ds_len == 0:
             raise ValueError(
                 f"Reference model training dataset is empty after applying debug/num_samples filters for {dataset_id}."
@@ -197,7 +254,11 @@ def generate_reference_models(
         has_full_model = (trial_output_dir / "config.json").exists()
         has_adapter = (trial_output_dir / "adapter_config.json").exists()
 
-        if has_full_model or has_adapter:
+        has_valid_manifest = _reference_model_manifest_matches(
+            trial_output_dir, suite, trial_seed
+        )
+
+        if (has_full_model or has_adapter) and has_valid_manifest:
             print(
                 f"\n[REF MODELS] Model weights found in {trial_output_dir}. Skipping training, loading for evaluation."
             )
@@ -223,12 +284,17 @@ def generate_reference_models(
 
             print(f"[REF MODELS] Applying chat formatting (Batch Size: {batch_size})...")
             formatter_func = get_formatting_function(dataset_id)
-            dataset = raw_full_ds.map(
+            training_dataset = _sample_reference_dataset(
+                raw_dataset=raw_full_ds,
+                num_samples=suite.prune.cfg.num_samples,
+                seed=trial_seed,
+            )
+            dataset = training_dataset.map(
                 lambda examples: formatter_func(tokenizer, examples, is_inference=False),
                 batched=True,
                 batch_size=batch_size,
                 desc="Tokenizing Data",
-                remove_columns=raw_full_ds.column_names,
+                remove_columns=training_dataset.column_names,
             )
             dataset = dataset.shuffle(seed=trial_seed)
 
@@ -260,6 +326,11 @@ def generate_reference_models(
                 merged_model.save_pretrained(trial_output_dir)
                 eval_model = merged_model
             tokenizer.save_pretrained(trial_output_dir)
+            _write_reference_model_manifest(
+                trial_output_dir=trial_output_dir,
+                suite=suite,
+                seed=trial_seed,
+            )
 
         current_scores, cfg = eval_and_save(
             model=eval_model,

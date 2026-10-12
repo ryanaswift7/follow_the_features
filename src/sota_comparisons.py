@@ -15,8 +15,8 @@ from src.schemas.suite import SuiteConfig
 from src.eval import eval_and_save
 from src.utils.enums import ModelType
 from src.utils.ensure_pad_token import ensure_pad_token
-from src.utils.sota.grape import GrapePipeline
-from src.utils.sota.s2l import S2LConsensusEngine
+from src.sota_methods.grape import GrapePipeline
+from src.sota_methods.s2l import select_s2l
 from src.utils.load_model_and_tokenizer import load_model_and_tokenizer
 
 

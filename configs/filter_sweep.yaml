@@ -68,4 +68,4 @@ eval:
         gpu_memory_utilization: 0.9
         max_model_len: 8192
   params:
-    batch_size: 32
+    batch_size: 4

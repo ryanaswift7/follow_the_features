@@ -10,6 +10,85 @@ from huggingface_hub import create_repo
 import multiprocessing as mp
 from tqdm.auto import tqdm
 
+
+def format_grape_prompt(tokenizer, instruction):
+    if tokenizer.chat_template:
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": instruction}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    return f"Question: {instruction}\nAnswer: "
+
+
+def select_grape_responses(model, tokenizer, candidates, budget, batch_size=1):
+    """Select one highest normalized-probability response per instruction.
+
+    ``candidates`` is a sequence of dictionaries with ``instruction`` and a
+    ``responses`` list.  This is the response-level GRAPE operation from the
+    paper, kept independent of Hub persistence and teacher generation.
+    """
+    if budget > len(candidates):
+        raise ValueError(
+            "GRAPE cannot satisfy the requested budget: the budget exceeds "
+            f"the number of unique instructions ({budget} > {len(candidates)}). "
+            "GRAPE selects at most one response per instruction."
+        )
+    if budget < 0:
+        raise ValueError("GRAPE budget must be non-negative")
+
+    device = next(model.parameters()).device
+    scored = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(candidates), batch_size):
+            batch = candidates[start : start + batch_size]
+            prompts = [
+                format_grape_prompt(tokenizer, item["instruction"])
+                for item in batch
+            ]
+            for item, prompt in zip(batch, prompts):
+                prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+                response_scores = []
+                for response in item["responses"]:
+                    full = tokenizer(
+                        prompt + response,
+                        add_special_tokens=False,
+                        return_tensors="pt",
+                    )
+                    inputs = {key: value.to(device) for key, value in full.items()}
+                    logits = model(**inputs).logits[0, :-1]
+                    labels = inputs["input_ids"][0, 1:]
+                    logprobs = torch.log_softmax(logits, dim=-1)
+                    token_logprobs = torch.gather(
+                        logprobs, -1, labels.unsqueeze(-1)
+                    ).squeeze(-1)
+                    response_logprobs = token_logprobs[len(prompt_ids) - 1 :]
+                    response_scores.append(
+                        response_logprobs.mean().item()
+                        if response_logprobs.numel()
+                        else float("-inf")
+                    )
+                best = int(np.argmax(response_scores))
+                scored.append({**item, "score": response_scores[best], "best": best})
+
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return [
+        {
+            "messages": [
+                {"role": "user", "content": item["instruction"]},
+                {"role": "assistant", "content": item["responses"][item["best"]]},
+            ],
+            "grape_score": item["score"],
+            "generator": (
+                item.get("sources", [])[item["best"]]
+                if item.get("sources")
+                else None
+            ),
+        }
+        for item in scored[:budget]
+    ]
+
 class GrapePipeline:
     def __init__(
             self, 

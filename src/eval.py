@@ -13,6 +13,7 @@ from src.utils.constants import (
     EVAL_CONFIG_FILENAME,
     EVAL_ID_KEY,
     EVAL_RESULTS_FILENAME,
+    SFT_ID_KEY,
     has_current_eval_metrics,
     EVAL_RESULTS_KEY,
 )
@@ -122,6 +123,7 @@ def verify_or_run_baseline(
             )
             if (
                 cfg_data.get(EVAL_ID_KEY) == suite.ids.eval
+                and cfg_data.get(SFT_ID_KEY) == suite.ids.sft
                 and seed_matches
                 and has_current_eval_metrics(res_data, run_lm_eval, run_judge_eval)
             ):

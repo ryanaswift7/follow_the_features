@@ -7,6 +7,7 @@ PRUNE_ID_KEY = "prune_id"
 SFT_ID_KEY = "sft_id"
 MODEL_EXISTENCE_FILENAME = "config.json"
 MODEL_CONFIG_FILENAME = "sft_model_config.json"
+REFERENCE_MANIFEST_FILENAME = "reference_manifest.json"
 DATASET_CONFIG_FILENAME = "prune_dataset_config.json"
 INVALID_JUDGE_LOG_FILENAME = "logs/invalid_judge_logs.txt"
 
