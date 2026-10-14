@@ -100,6 +100,7 @@ def verify_or_run_baseline(
     suite: SuiteConfig,
     run_lm_eval: bool,
     run_judge_eval: bool,
+    dataset_size: int | None = None,
 ) -> None:
     """
     Checks for existing valid evaluations or runs a new one.
@@ -165,6 +166,7 @@ def verify_or_run_baseline(
     else:
         generate_reference_models(
             suite=suite,
+            dataset_size=cast(int, dataset_size),
             run_lm_eval=run_lm_eval,
             run_judge_eval=run_judge_eval,
         )
@@ -183,14 +185,15 @@ def run_baseline_evals(suite: SuiteConfig):
         print("[BASELINE] Both LM eval and judge eval are disabled. Skipping baselines.")
         return
 
-    if run_lm_eval or run_judge_eval:
+    for dataset_size in suite.prune.params.dataset_sizes:
         verify_or_run_baseline(
             model_id=suite.sft.cfg.base_model_id,
             model_type=ModelType.REFERENCE,
-            eval_dir=suite.dirs.reference_model_summary_eval,
+            eval_dir=suite.dirs.reference_model_summary_eval(dataset_size),
             suite=suite,
             run_lm_eval=run_lm_eval,
             run_judge_eval=run_judge_eval,
+            dataset_size=dataset_size,
         )
 
     for seed in suite.seeds:

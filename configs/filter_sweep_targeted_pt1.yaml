@@ -1,4 +1,4 @@
-title: filter_sweep
+title: filter_sweep_targeted_pt1
 output_dir: filter_experiments
 seeds: [6, 7, 67]
 debug_mode: false
@@ -16,21 +16,21 @@ prune:
   params:
     batch_size: 32
     dataset_sizes:
-    - 10
+    # - 10
     - 100
     # - 500
     - 1000
     # - 5000
-    - 10000
+    # - 10000
     # - 51760
     topk_features:
     - 1
     - 5
-    - 10
+    # - 10
     # - 50
-    - 100
+    # - 100
     # - 150
-    - 200
+    # - 200
 sft:
   cfg:
     tokenizer_id: HuggingFaceTB/SmolLM3-3B

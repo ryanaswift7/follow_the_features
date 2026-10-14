@@ -6,8 +6,8 @@ from pathlib import Path
 import pandas as pd
 from datasets import Dataset
 
-from src.analysis import _mean_numeric_dicts
-from src.analysis import write_manifest
+from src.analysis import _harmonic_mean, _mean_numeric_dicts
+from src.analysis import plot_experiment_results, write_manifest
 from src.reference_models import (
     _cache_config_matches,
     _reference_model_manifest_matches,
@@ -68,10 +68,11 @@ class SeedSweepTests(unittest.TestCase):
         suite = SuiteConfig.from_yaml("configs/debug.yaml")
         with TemporaryDirectory() as output_dir:
             suite = suite.model_copy(update={"output_dir": Path(output_dir)})
-            reference_path = suite.dirs.get_ref_model_root_by_seed(suite.seeds[0])
+            reference_path = suite.dirs.get_ref_model_root_by_seed(2, suite.seeds[0])
 
-            self.assertEqual(reference_path.parent.name, suite.ids.sft)
+            self.assertEqual(reference_path.parent.parent.name, suite.ids.sft)
             self.assertIn("reference_models", reference_path.parts)
+            self.assertIn("ds2", reference_path.parts)
             self.assertIn(f"seed_{suite.seeds[0]}", reference_path.parts)
 
     def test_nested_scores_are_averaged(self):
@@ -82,6 +83,47 @@ class SeedSweepTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result, {"average": 0.3, "nested": {"score": 2.0}})
+
+    def test_harmonic_mean_uses_0_to_100_scores(self):
+        self.assertEqual(_harmonic_mean(50.0, 25.0), 100 / 3)
+        self.assertTrue(pd.isna(_harmonic_mean(50.0, float("nan"))))
+
+    def test_analysis_scales_lm_scores_and_writes_hmean_first(self):
+        suite = SuiteConfig.from_yaml("configs/debug.yaml")
+        with TemporaryDirectory() as output_dir:
+            suite = suite.model_copy(update={"output_dir": Path(output_dir)})
+            results = pd.DataFrame(
+                [
+                    {
+                        "model_type": "base",
+                        "dataset_size": -1,
+                        "topk_features": -1,
+                        "lm_eval_results": {"leaderboard": 0.2, "ifeval": 0.1},
+                        "reference_results": {"alpacaeval": 30.0},
+                    },
+                    {
+                        "model_type": "adapter",
+                        "dataset_size": 2,
+                        "topk_features": 10,
+                        "lm_eval_results": {"leaderboard": 0.6, "ifeval": 0.5},
+                        "reference_results": {"alpacaeval": 50.0},
+                    },
+                ]
+            )
+
+            plot_experiment_results(results, suite)
+
+            table_path = suite.dirs.main_results / "tables" / "top10" / "summary_report.csv"
+            table = pd.read_csv(table_path)
+            self.assertEqual(
+                list(table.columns)[2], "alpacaeval_leaderboard_hmean"
+            )
+            self.assertEqual(table.loc[0, "leaderboard"], 20.0)
+            self.assertEqual(table.loc[1, "leaderboard"], 60.0)
+            self.assertAlmostEqual(table.loc[1, "alpacaeval_leaderboard_hmean"], 54.54545, places=4)
+            self.assertTrue(
+                (suite.dirs.main_results / "plots" / "top10" / "alpacaeval_leaderboard_hmean.png").exists()
+            )
 
     def test_manifest_uses_new_results_root_and_relative_model_paths(self):
         suite = SuiteConfig.from_yaml("configs/debug.yaml")
@@ -98,7 +140,7 @@ class SeedSweepTests(unittest.TestCase):
                     },
                     {
                         "model_type": "reference",
-                        "dataset_size": -1,
+                        "dataset_size": 2,
                         "topk_features": -1,
                         "lm_eval_results": {"leaderboard": 0.4, "ifeval": 0.4},
                         "reference_results": {"alpacaeval": 0.5},
@@ -196,6 +238,7 @@ class SeedSweepTests(unittest.TestCase):
                     {
                         "model_type": "reference",
                         "base_model_id": suite.sft.cfg.base_model_id,
+                        "dataset_size": 2,
                         "seed": suite.seeds[0],
                         "sft_id": suite.ids.sft,
                     }
@@ -203,20 +246,21 @@ class SeedSweepTests(unittest.TestCase):
             )
 
             self.assertTrue(
-                _reference_model_manifest_matches(model_dir, suite, suite.seeds[0])
+                _reference_model_manifest_matches(model_dir, suite, 2, suite.seeds[0])
             )
             manifest_path.write_text(
                 json.dumps(
                     {
                         "model_type": "reference",
                         "base_model_id": suite.sft.cfg.base_model_id,
+                        "dataset_size": 2,
                         "seed": suite.seeds[0],
                         "sft_id": "sft_stale",
                     }
                 )
             )
             self.assertFalse(
-                _reference_model_manifest_matches(model_dir, suite, suite.seeds[0])
+                _reference_model_manifest_matches(model_dir, suite, 2, suite.seeds[0])
             )
 
     def test_reference_dataset_is_shuffled_before_sampling(self):

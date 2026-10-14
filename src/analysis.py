@@ -10,6 +10,17 @@ from src.utils.constants import EVAL_RESULTS_FILENAME, NAN_RESULT
 from src.utils.enums import ModelType
 
 
+HMEAN_METRIC = "alpacaeval_leaderboard_hmean"
+
+
+def _harmonic_mean(alpacaeval: float, leaderboard: float) -> float:
+    if pd.isna(alpacaeval) or pd.isna(leaderboard):
+        return float("nan")
+    if alpacaeval + leaderboard == 0:
+        return 0.0
+    return 2 * alpacaeval * leaderboard / (alpacaeval + leaderboard)
+
+
 def _mean_numeric_dicts(dicts: list[dict]) -> dict:
     """Average numeric leaves while preserving nested result structures."""
     if not dicts:
@@ -69,16 +80,19 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
         }
         rows.append(base_data)
 
-    ref_data = load_json_safe(suite.dirs.reference_model_summary_eval / EVAL_RESULTS_FILENAME)
-    if ref_data:
-        ref_data.update(
-            {
-                "model_type": ModelType.REFERENCE.value,
-                "topk_features": NAN_RESULT,
-                "dataset_size": NAN_RESULT,
-            }
+    for n in suite.prune.params.dataset_sizes:
+        ref_data = load_json_safe(
+            suite.dirs.reference_model_summary_eval(n) / EVAL_RESULTS_FILENAME
         )
-        rows.append(ref_data)
+        if ref_data:
+            ref_data.update(
+                {
+                    "model_type": ModelType.REFERENCE.value,
+                    "topk_features": NAN_RESULT,
+                    "dataset_size": n,
+                }
+            )
+            rows.append(ref_data)
 
     for k in suite.prune.params.topk_features:
         for n in suite.prune.params.dataset_sizes:
@@ -163,15 +177,20 @@ def write_manifest(suite: SuiteConfig, results_df: pd.DataFrame) -> Path:
             }
         )
 
-    reference_row = find_row(ModelType.REFERENCE.value)
-    if reference_row is not None:
+    for dataset_size in suite.prune.params.dataset_sizes:
+        reference_row = find_row(ModelType.REFERENCE.value, dataset_size=dataset_size)
+        if reference_row is None:
+            continue
         manifest["references"].append(
             {
-                "name": f"reference_{Path(suite.sft.cfg.base_model_id).name}",
+                "name": f"reference_ds{dataset_size}_{Path(suite.sft.cfg.base_model_id).name}",
                 "model_type": ModelType.REFERENCE.value,
+                "dataset_size": dataset_size,
                 "seeds": suite.seeds,
                 "model_paths": [
-                    relative_model_path(suite.dirs.get_ref_model_root_by_seed(seed))
+                    relative_model_path(
+                        suite.dirs.get_ref_model_root_by_seed(dataset_size, seed)
+                    )
                     for seed in suite.seeds
                 ],
                 "scores": scores_for_row(reference_row),
@@ -229,6 +248,9 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
     ref_df.index = original_df.index
     lm_df = pd.json_normalize(lm_values)
     lm_df.index = original_df.index
+    for column in lm_df.select_dtypes(include="number").columns:
+        lm_df[column] *= 100
+
     scores_df = pd.concat(
         [
             original_df.drop(columns=["reference_results", "lm_eval_results"], errors="ignore"),
@@ -238,7 +260,11 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
         axis=1,
     )
 
-    all_metrics = list(ref_df.columns) + list(lm_df.columns)
+    scores_df[HMEAN_METRIC] = scores_df.apply(
+        lambda row: _harmonic_mean(row.get("alpacaeval"), row.get("leaderboard")),
+        axis=1,
+    )
+    all_metrics = [HMEAN_METRIC] + list(ref_df.columns) + list(lm_df.columns)
 
     if original_df.empty:
         print("[PLOT] No evaluation rows found. Skipping plots and summary generation.")
@@ -247,12 +273,15 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
     plot_metrics = [
         metric
         for metric in all_metrics
-        if metric == "alpacaeval" or metric == "leaderboard" or metric in {
+        if metric in {HMEAN_METRIC, "alpacaeval", "leaderboard"} or metric in {
             "ifeval", "bbh", "math_hard", "gpqa", "musr", "mmlu_pro"
         }
     ]
 
-    baseline_df = scores_df[scores_df["model_type"] != ModelType.ADAPTER.value].copy()
+    base_df = scores_df[scores_df["model_type"] == ModelType.BASE.value].copy()
+    reference_df = scores_df[
+        scores_df["model_type"] == ModelType.REFERENCE.value
+    ].copy()
     topk_values = [k for k in scores_df["topk_features"].unique() if k != NAN_RESULT]
 
     global_table_path = suite.dirs.main_results / "tables"
@@ -290,22 +319,36 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
                 continue
 
             plt.figure(figsize=(10, 6))
-            for _, row in baseline_df.iterrows():
+            for _, row in base_df.iterrows():
                 if pd.isna(row[metric]):
                     continue
 
-                is_reference = row["model_type"] == ModelType.REFERENCE.value
                 label = f"{row['model_type']} (baseline)"
-                style = "--" if is_reference else ":"
 
                 plt.axhline(
                     y=row[metric],
                     color="grey",
-                    linestyle=style,
+                    linestyle=":",
                     label=label,
                     alpha=0.7,
                     linewidth=1.5,
                     zorder=1,
+                )
+
+            reference_metric_df = reference_df.dropna(subset=[metric]).sort_values(
+                "dataset_size"
+            )
+            if not reference_metric_df.empty:
+                plt.plot(
+                    reference_metric_df["dataset_size"],
+                    reference_metric_df[metric],
+                    marker="s",
+                    linestyle="--",
+                    linewidth=1.8,
+                    color="grey",
+                    label="Reference (Random)",
+                    alpha=0.85,
+                    zorder=2,
                 )
 
             plt.plot(
@@ -313,7 +356,7 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
                 pruned_k_df[metric],
                 marker="o",
                 linewidth=2,
-                label=f"Pruned (Top-{k})",
+                label=f"Filtered (Top-{k})",
             )
 
             plt.xlabel("Dataset Size")
@@ -325,11 +368,11 @@ def plot_experiment_results(original_df: pd.DataFrame, suite: SuiteConfig) -> pd
             plt.savefig(plot_path / f"{metric}.png")
             plt.close()
 
-        combined_display_df = pd.concat([baseline_df, pruned_k_df])
+        combined_display_df = pd.concat([base_df, reference_df, pruned_k_df])
         cols = ["model_type", "dataset_size"] + all_metrics
         final_table = combined_display_df[cols].copy()
         final_table.loc[
-            final_table["model_type"] != ModelType.ADAPTER.value, "dataset_size"
+            final_table["model_type"] == ModelType.BASE.value, "dataset_size"
         ] = NAN_RESULT
         final_table.to_csv(table_path / "summary_report.csv", index=False)
         final_table.to_parquet(table_path / "summary_report.parquet")

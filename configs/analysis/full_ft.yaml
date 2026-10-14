@@ -76,4 +76,4 @@ eval:
     #   candidate_model_kwargs: {}
     #   judge_model_kwargs: {}
   params:
-    batch_size: 4
+    batch_size: 1

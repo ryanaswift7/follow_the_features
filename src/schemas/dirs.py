@@ -84,11 +84,10 @@ class SuiteDirs(BaseModel):
     def reference_model_summary_root(self) -> Path:
         return self.ensure_dir(self.reference_model_root / "summary")
 
-    @computed_field
-    @property
-    def reference_model_summary_eval(self) -> Path:
-        # Aggregate reference-model summary results live in a nested eval dir.
-        return self.ensure_dir(self.reference_model_summary_root / self.ids.eval)
+    def reference_model_summary_eval(self, dataset_size: int) -> Path:
+        return self.ensure_dir(
+            self.reference_model_summary_root / f"ds{dataset_size}" / self.ids.eval
+        )
     
     # --- STANDARD METHODS (Take arguments, NOT properties) ---
     
@@ -119,24 +118,32 @@ class SuiteDirs(BaseModel):
             / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
         )
 
-    def get_ref_model_root_by_seed(self, seed: int) -> Path:
-        return self.ensure_dir(self.reference_model_root / f"seed_{seed}")
-
-    def get_ref_model_eval_by_seed(self, seed: int) -> Path:
-        return self.ensure_dir(self.get_ref_model_root_by_seed(seed) / self.ids.eval)
-    
-    def get_ref_model_gen_cache_by_seed(self, seed: int, max_new_tokens: int) -> Path:
+    def get_ref_model_root_by_seed(self, dataset_size: int, seed: int) -> Path:
         return self.ensure_dir(
-            self.get_ref_model_root_by_seed(seed)
+            self.reference_model_root / f"ds{dataset_size}" / f"seed_{seed}"
+        )
+
+    def get_ref_model_eval_by_seed(self, dataset_size: int, seed: int) -> Path:
+        return self.ensure_dir(
+            self.get_ref_model_root_by_seed(dataset_size, seed) / self.ids.eval
+        )
+    
+    def get_ref_model_gen_cache_by_seed(
+        self, dataset_size: int, seed: int, max_new_tokens: int
+    ) -> Path:
+        return self.ensure_dir(
+            self.get_ref_model_root_by_seed(dataset_size, seed)
             / self.get_generation_cache_subdir(max_new_tokens=max_new_tokens)
         )
 
     def get_base_model_alpaca_eval_model_configs_dir(self) -> Path:
         return self.ensure_dir(self.base_model_root / "alpaca_eval_model_configs")
 
-    def get_ref_model_alpaca_eval_model_configs_dir_by_seed(self, seed: int) -> Path:
+    def get_ref_model_alpaca_eval_model_configs_dir_by_seed(
+        self, dataset_size: int, seed: int
+    ) -> Path:
         return self.ensure_dir(
-            self.get_ref_model_root_by_seed(seed)
+            self.get_ref_model_root_by_seed(dataset_size, seed)
             / "alpaca_eval_model_configs"
         )
 

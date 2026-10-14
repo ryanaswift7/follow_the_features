@@ -38,7 +38,12 @@ def write_eval_results_and_config(
         assert ref_model_seed is not None, (
             "Seed must be provided when running evals on reference models."
         )
-        model_path = suite.dirs.get_ref_model_root_by_seed(ref_model_seed).as_posix()
+        assert dataset_size is not None, (
+            "Dataset size must be provided when running evals on reference models."
+        )
+        model_path = suite.dirs.get_ref_model_root_by_seed(
+            dataset_size, ref_model_seed
+        ).as_posix()
         dataset_path = None
     elif model_type == ModelType.BASE:
         model_path = suite.dirs.base_model_root.as_posix()
@@ -77,7 +82,10 @@ def write_eval_results_and_config(
         assert ref_model_seed is not None, (
             "Seed must be provided when running evals on reference models."
         )
-        eval_dir = suite.dirs.get_ref_model_eval_by_seed(ref_model_seed)
+        assert dataset_size is not None, (
+            "Dataset size must be provided when running evals on reference models."
+        )
+        eval_dir = suite.dirs.get_ref_model_eval_by_seed(dataset_size, ref_model_seed)
 
     eval_config_path = eval_dir / EVAL_CONFIG_FILENAME
     results_path = eval_dir / EVAL_RESULTS_FILENAME
@@ -278,8 +286,14 @@ def run_phase4_judge_evaluation(
     elif model_type == ModelType.REFERENCE:
         if ref_model_seed is None:
             raise ValueError("ref_model_seed must be provided for reference model judge evaluation.")
-        model_path = suite.dirs.get_ref_model_root_by_seed(ref_model_seed).as_posix()
-        eval_output_dir = suite.dirs.get_ref_model_eval_by_seed(ref_model_seed)
+        if dataset_size is None:
+            raise ValueError("dataset_size must be provided for reference model judge evaluation.")
+        model_path = suite.dirs.get_ref_model_root_by_seed(
+            dataset_size, ref_model_seed
+        ).as_posix()
+        eval_output_dir = suite.dirs.get_ref_model_eval_by_seed(
+            dataset_size, ref_model_seed
+        )
     elif model_type == ModelType.SOTA:
         if sota_model_path is None or sota_eval_output_dir is None:
             raise ValueError("SOTA judge evaluation requires an explicit model and output path")

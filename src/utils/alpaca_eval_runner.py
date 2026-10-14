@@ -54,7 +54,9 @@ def _resolve_model_config_identity(
     elif kind == "reference":
         if ref_model_seed is None:
             raise ValueError("ref_model_seed must be provided for reference model AlpacaEval configs.")
-        model_key = f"fdp_reference_seed_{ref_model_seed}_{base_model_slug}"
+        if dataset_size is None:
+            raise ValueError("dataset_size must be provided for reference model AlpacaEval configs.")
+        model_key = f"fdp_reference_ds{dataset_size}_seed_{ref_model_seed}_{base_model_slug}"
     elif kind == "adapter":
         if dataset_size is None or topk is None:
             raise ValueError("dataset_size and topk must be provided for adapter AlpacaEval configs.")

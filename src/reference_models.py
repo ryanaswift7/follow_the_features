@@ -64,15 +64,20 @@ def _mean_numeric_dicts(dicts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _cache_config_matches(
-    cfg: dict[str, Any], suite: SuiteConfig, seed: int | None = None
+    cfg: dict[str, Any],
+    suite: SuiteConfig,
+    seed: int | None = None,
+    dataset_size: int | None = None,
 ) -> bool:
     if cfg.get("eval_id") != suite.ids.eval or cfg.get("sft_id") != suite.ids.sft:
         return False
-    return seed is None or cfg.get("seed") == seed
+    if seed is not None and cfg.get("seed") != seed:
+        return False
+    return dataset_size is None or cfg.get("dataset_size") == dataset_size
 
 
 def _reference_model_manifest_matches(
-    trial_output_dir, suite: SuiteConfig, seed: int
+    trial_output_dir, suite: SuiteConfig, dataset_size: int, seed: int
 ) -> bool:
     manifest_path = trial_output_dir / REFERENCE_MANIFEST_FILENAME
     try:
@@ -85,14 +90,18 @@ def _reference_model_manifest_matches(
         manifest.get("model_type") == ModelType.REFERENCE.value
         and manifest.get("base_model_id") == suite.sft.cfg.base_model_id
         and manifest.get("sft_id") == suite.ids.sft
+        and manifest.get("dataset_size") == dataset_size
         and manifest.get("seed") == seed
     )
 
 
-def _write_reference_model_manifest(trial_output_dir, suite: SuiteConfig, seed: int) -> None:
+def _write_reference_model_manifest(
+    trial_output_dir, suite: SuiteConfig, dataset_size: int, seed: int
+) -> None:
     manifest = {
         "model_type": ModelType.REFERENCE.value,
         "base_model_id": suite.sft.cfg.base_model_id,
+        "dataset_size": dataset_size,
         "seed": seed,
         "sft_id": suite.ids.sft,
         "sft_config": suite.sft.cfg.model_dump(),
@@ -109,10 +118,15 @@ def _sample_reference_dataset(raw_dataset, num_samples: int | None, seed: int):
 
 
 def _trial_has_valid_results(
-    trial_output_dir, suite: SuiteConfig, expected_sections: list[str], seed: int
+    trial_output_dir,
+    suite: SuiteConfig,
+    dataset_size: int,
+    expected_sections: list[str],
+    seed: int,
 ) -> bool:
-    results_path = trial_output_dir / EVAL_RESULTS_FILENAME
-    config_path = trial_output_dir / EVAL_CONFIG_FILENAME
+    eval_dir = suite.dirs.get_ref_model_eval_by_seed(dataset_size, seed)
+    results_path = eval_dir / EVAL_RESULTS_FILENAME
+    config_path = eval_dir / EVAL_CONFIG_FILENAME
     if not (results_path.exists() and config_path.exists()):
         return False
 
@@ -124,10 +138,12 @@ def _trial_has_valid_results(
     except (json.JSONDecodeError, OSError):
         return False
 
-    if not _reference_model_manifest_matches(trial_output_dir, suite, seed):
+    if not _reference_model_manifest_matches(
+        trial_output_dir, suite, dataset_size, seed
+    ):
         return False
 
-    if not _cache_config_matches(cfg, suite, seed=seed):
+    if not _cache_config_matches(cfg, suite, seed=seed, dataset_size=dataset_size):
         return False
 
     return has_current_eval_metrics(
@@ -139,6 +155,7 @@ def _trial_has_valid_results(
 
 def generate_reference_models(
     suite: SuiteConfig,
+    dataset_size: int,
     run_lm_eval: bool = True,
     run_judge_eval: bool = True,
 ):
@@ -147,8 +164,9 @@ def generate_reference_models(
     batch_size = suite.prune.params.batch_size
     base_model_id = suite.sft.cfg.base_model_id
 
-    overall_results_path = suite.dirs.reference_model_summary_eval / EVAL_RESULTS_FILENAME
-    overall_config_path = suite.dirs.reference_model_summary_eval / EVAL_CONFIG_FILENAME
+    overall_eval_dir = suite.dirs.reference_model_summary_eval(dataset_size)
+    overall_results_path = overall_eval_dir / EVAL_RESULTS_FILENAME
+    overall_config_path = overall_eval_dir / EVAL_CONFIG_FILENAME
 
     print(f"\n{'=' * 50}")
     print("[REF MODELS] Initializing Reference Model Generator")
@@ -156,7 +174,8 @@ def generate_reference_models(
     print(f"  - Base Model:   {base_model_id}")
     print(f"  - Ref Models:   {len(configured_seeds)}")
     print(f"  - Seeds:        {configured_seeds}")
-    print("  - Training on:  FULL DATASET")
+    print(f"  - Training on:  {dataset_size} examples")
+    print(f"  - Summary eval: {overall_eval_dir}")
     print(f"{'=' * 50}\n")
 
     if not (run_lm_eval or run_judge_eval):
@@ -176,11 +195,14 @@ def generate_reference_models(
             with open(overall_config_path, "r") as f:
                 cfg = json.load(f)
             if (
-                _cache_config_matches(cfg, suite)
+                _cache_config_matches(cfg, suite, dataset_size=dataset_size)
                 and cfg.get("seeds") == configured_seeds
                 and all(
                     _reference_model_manifest_matches(
-                        suite.dirs.get_ref_model_root_by_seed(seed), suite, seed
+                        suite.dirs.get_ref_model_root_by_seed(dataset_size, seed),
+                        suite,
+                        dataset_size,
+                        seed,
                     )
                     for seed in configured_seeds
                 )
@@ -193,8 +215,10 @@ def generate_reference_models(
 
     models_to_train = []
     for trial_seed in configured_seeds:
-        trial_output_dir = suite.dirs.get_ref_model_root_by_seed(trial_seed)
-        if not _trial_has_valid_results(trial_output_dir, suite, expected_sections, trial_seed):
+        trial_output_dir = suite.dirs.get_ref_model_root_by_seed(dataset_size, trial_seed)
+        if not _trial_has_valid_results(
+            trial_output_dir, suite, dataset_size, expected_sections, trial_seed
+        ):
             models_to_train.append(trial_seed)
 
     if models_to_train:
@@ -207,16 +231,18 @@ def generate_reference_models(
         if suite.debug_mode:
             raw_full_ds = raw_full_ds.select(range(1))
 
-        requested_size = (
-            suite.prune.cfg.num_samples
-            if suite.prune.cfg.num_samples is not None
-            else len(raw_full_ds)
-        )
-        full_ds_len = min(requested_size, len(raw_full_ds))
-        if full_ds_len == 0:
+        if (
+            suite.prune.cfg.num_samples is not None
+            and suite.prune.cfg.num_samples < len(raw_full_ds)
+        ):
+            raw_full_ds = raw_full_ds.select(range(suite.prune.cfg.num_samples))
+
+        if dataset_size <= 0 or dataset_size > len(raw_full_ds):
             raise ValueError(
-                f"Reference model training dataset is empty after applying debug/num_samples filters for {dataset_id}."
+                f"Reference dataset size {dataset_size} must be between 1 and "
+                f"{len(raw_full_ds)} after applying the pruning pool limit."
             )
+        full_ds_len = dataset_size
     else:
         print("[REF MODELS] All individual reference models already have valid cached results.")
         raw_full_ds = None
@@ -230,16 +256,27 @@ def generate_reference_models(
     pbar_models = tqdm(configured_seeds, desc="Training/Loading Ref Models", position=0)
 
     for model_index, trial_seed in enumerate(pbar_models):
-        trial_output_dir = suite.dirs.get_ref_model_root_by_seed(trial_seed)
+        trial_output_dir = suite.dirs.get_ref_model_root_by_seed(dataset_size, trial_seed)
         trial_output_dir.mkdir(parents=True, exist_ok=True)
 
-        trial_results_path = trial_output_dir / EVAL_RESULTS_FILENAME
-        trial_config_path = trial_output_dir / EVAL_CONFIG_FILENAME
+        trial_eval_dir = suite.dirs.get_ref_model_eval_by_seed(dataset_size, trial_seed)
+        trial_results_path = trial_eval_dir / EVAL_RESULTS_FILENAME
+        trial_config_path = trial_eval_dir / EVAL_CONFIG_FILENAME
+
+        print(
+            f"[REF MODELS] Checking seed {trial_seed}: "
+            f"model_dir={trial_output_dir}, eval_dir={trial_eval_dir}"
+        )
 
         pbar_models.set_description(f"Ref Model {model_index + 1}/{len(configured_seeds)} (seed {trial_seed})")
 
-        if _trial_has_valid_results(trial_output_dir, suite, expected_sections, trial_seed):
-            print(f"\n[REF MODELS] Cached results for Ref Model {model_index + 1} are valid. Loading.")
+        if _trial_has_valid_results(
+            trial_output_dir, suite, dataset_size, expected_sections, trial_seed
+        ):
+            print(
+                f"\n[REF MODELS] Cached results for Ref Model {model_index + 1} "
+                f"are valid. Loading from {trial_eval_dir}."
+            )
             with open(trial_results_path, "r") as f:
                 current_scores = json.load(f)
             with open(trial_config_path, "r") as f:
@@ -255,12 +292,13 @@ def generate_reference_models(
         has_adapter = (trial_output_dir / "adapter_config.json").exists()
 
         has_valid_manifest = _reference_model_manifest_matches(
-            trial_output_dir, suite, trial_seed
+            trial_output_dir, suite, dataset_size, trial_seed
         )
 
         if (has_full_model or has_adapter) and has_valid_manifest:
             print(
-                f"\n[REF MODELS] Model weights found in {trial_output_dir}. Skipping training, loading for evaluation."
+                f"\n[REF MODELS] Model weights found in {trial_output_dir}. "
+                f"Skipping training, loading for evaluation; saving eval to {trial_eval_dir}."
             )
             if has_adapter:
                 eval_model, tokenizer = load_model_and_tokenizer(
@@ -286,7 +324,7 @@ def generate_reference_models(
             formatter_func = get_formatting_function(dataset_id)
             training_dataset = _sample_reference_dataset(
                 raw_dataset=raw_full_ds,
-                num_samples=suite.prune.cfg.num_samples,
+                num_samples=dataset_size,
                 seed=trial_seed,
             )
             dataset = training_dataset.map(
@@ -329,8 +367,14 @@ def generate_reference_models(
             _write_reference_model_manifest(
                 trial_output_dir=trial_output_dir,
                 suite=suite,
+                dataset_size=dataset_size,
                 seed=trial_seed,
             )
+
+        if "trainer" in locals():
+            del trainer
+            gc.collect()
+            torch.cuda.empty_cache()
 
         current_scores, cfg = eval_and_save(
             model=eval_model,
@@ -342,6 +386,7 @@ def generate_reference_models(
             save_results_and_config=True,
             ref_model_seed=trial_seed,
             gen_cache_dir=suite.dirs.get_ref_model_gen_cache_by_seed(
+                dataset_size=dataset_size,
                 seed=trial_seed,
                 max_new_tokens=suite.eval.cfg.lm_eval.max_new_tokens,
             ),
@@ -364,7 +409,7 @@ def generate_reference_models(
     if run_judge_eval:
         final_results["reference_results"] = _mean_numeric_dicts(all_judge_scores)
 
-    suite.dirs.reference_model_summary_eval.mkdir(parents=True, exist_ok=True)
+    overall_eval_dir.mkdir(parents=True, exist_ok=True)
     with open(overall_results_path, "w") as f:
         json.dump(final_results, f, indent=4)
     with open(overall_config_path, "w") as f:
@@ -381,7 +426,8 @@ def main():
     config_path = args.config
 
     suite = SuiteConfig.from_yaml(config_path)
-    generate_reference_models(suite=suite)
+    for dataset_size in suite.prune.params.dataset_sizes:
+        generate_reference_models(suite=suite, dataset_size=dataset_size)
 
 
 if __name__ == "__main__":
