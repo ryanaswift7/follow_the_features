@@ -18,6 +18,7 @@ class SuiteConfig(BaseModel):
     seeds: list[int]
     active_seed: int | None = Field(default=None, exclude=True)
     debug_mode: bool = False
+    full_data_reference: bool = False
 
     prune: PruneSetup
     sft: SFTSetup
@@ -44,6 +45,13 @@ class SuiteConfig(BaseModel):
             raise ValueError(f"Seed {seed} is not configured")
         return self.model_copy(update={"active_seed": seed})
 
+    @property
+    def reference_dataset_sizes(self) -> list[int]:
+        sizes = list(self.prune.params.dataset_sizes)
+        if self.full_data_reference and self.prune.cfg.num_samples not in sizes:
+            sizes.append(self.prune.cfg.num_samples)
+        return sizes
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> "SuiteConfig":
         with open(path, "r") as f:
@@ -56,7 +64,7 @@ class SuiteConfig(BaseModel):
         p_id = f"prune_{config_hash(self.prune.cfg.model_dump())}_{self.prune.cfg.diversity_tag}"
         s_id = f"sft_{config_hash(self.sft.cfg.model_dump())}"
         e_id = f"eval_{config_hash(self.eval.cfg.model_dump())}"
-        exp_id = f"exp_{string_hash(p_id + s_id + e_id + str(self.seeds))}"
+        exp_id = f"exp_{string_hash(p_id + s_id + e_id + str(self.seeds) + str(self.full_data_reference))}"
 
         return SuiteIDs(prune=p_id, sft=s_id, eval=e_id, experiment=exp_id)
 

@@ -35,3 +35,7 @@ data-ordering/
 do_experiments/
 sota_eval_logs/
 *experiments/
+
+llama_ultrachat/
+olmo_dolci/
+qwen_alpaca/

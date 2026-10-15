@@ -185,7 +185,7 @@ def run_baseline_evals(suite: SuiteConfig):
         print("[BASELINE] Both LM eval and judge eval are disabled. Skipping baselines.")
         return
 
-    for dataset_size in suite.prune.params.dataset_sizes:
+    for dataset_size in suite.reference_dataset_sizes:
         verify_or_run_baseline(
             model_id=suite.sft.cfg.base_model_id,
             model_type=ModelType.REFERENCE,

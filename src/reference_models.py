@@ -426,7 +426,7 @@ def main():
     config_path = args.config
 
     suite = SuiteConfig.from_yaml(config_path)
-    for dataset_size in suite.prune.params.dataset_sizes:
+    for dataset_size in suite.reference_dataset_sizes:
         generate_reference_models(suite=suite, dataset_size=dataset_size)
 
 

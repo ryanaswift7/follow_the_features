@@ -1,0 +1,72 @@
+title: filter_100_1k_olmo_dolci
+output_dir: olmo_dolci
+seeds: [6, 7, 67]
+debug_mode: false
+# full_data_reference: true
+prune:
+  cfg:
+    prune_model_id: google/gemma-3-12b-it
+    sae_release: gemma-scope-2-12b-it-res
+    sae_id: layer_24_width_65k_l0_medium
+    dataset_id: ryanaswift7/dolci-instruct-sft-no-tools-100k
+    num_samples: &num_samples 100000
+    seq_agg_method: last_token
+    feat_agg_method: mean
+    divide_by_entropy: true
+    diversity_param: 0.2
+  params:
+    batch_size: 32
+    dataset_sizes:
+    # - 10
+    - 100
+    # - 500
+    - 1000
+    # - 5000
+    # - 10000
+    # - 51760
+    topk_features:
+    # - 1
+    - 5
+    # - 10
+    # - 50
+    # - 100
+    # - 150
+    # - 200
+sft:
+  cfg:
+    tokenizer_id: allenai/Olmo-3-7B-Instruct
+    base_model_id: allenai/Olmo-3-1025-7B
+    max_seq_length: 256
+    learning_rate: 0.0002
+    lr_scheduler_type: cosine
+    full_ft: false
+  params:
+    batch_size: 32
+eval:
+  cfg:
+    lm_eval:
+      run: true
+      max_new_tokens: 256
+      tasks:
+      - leaderboard
+      task_limit: null
+    alpacaeval:
+      run: true
+      candidate_backend: vllm
+      judge_backend: vllm
+      model_name: Qwen/Qwen3.8-27B-FP8
+      dataset: alpaca_eval_gpt4_baseline
+      max_instances: 300
+      max_new_tokens: 256
+      judge_max_tokens: 512
+      judge_enable_thinking: false
+      temperature: 0.0
+      top_p: 1.0
+      candidate_model_kwargs:
+        gpu_memory_utilization: 0.9
+        max_model_len: 8192
+      judge_model_kwargs:
+        gpu_memory_utilization: 0.9
+        max_model_len: 8192
+  params:
+    batch_size: 4

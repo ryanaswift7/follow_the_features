@@ -1,5 +1,5 @@
-title: olmo_dolci_order
-output_dir: olmo_dolci_order
+title: order_olmo_dolci
+output_dir: olmo_dolci
 seeds: [6, 7, 67]
 debug_mode: false
 prune:
@@ -27,8 +27,8 @@ prune:
     # - 200
 sft:
   cfg:
-    tokenizer_id: meta-llama/Llama-3.1-8B-Instruct
-    base_model_id: meta-llama/Llama-3.1-8B
+    tokenizer_id: allenai/Olmo-3-7B-Instruct
+    base_model_id: allenai/Olmo-3-1025-7B
     max_seq_length: 256
     learning_rate: 0.0002
     lr_scheduler_type: cosine

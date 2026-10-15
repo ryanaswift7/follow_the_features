@@ -1,5 +1,5 @@
-title: llama_ultrachat_order
-output_dir: llama_ultrachat_order
+title: order_llama_ultrachat
+output_dir: llama_ultrachat
 seeds: [6, 7, 67]
 debug_mode: false
 prune:

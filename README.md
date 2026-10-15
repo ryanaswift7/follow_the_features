@@ -86,6 +86,7 @@ The main pipeline uses a nested YAML config that maps to `src.schemas.suite.Suit
 | `output_dir` | path/string | Root directory for generated artifacts. |
 | `seeds` | list[int] | Reproducibility seeds. Every model is trained and evaluated for each seed, then numeric scores are averaged across seeds. |
 | `debug_mode` | bool | Convenience flag for small/debug runs. |
+| `full_data_reference` | bool | If `true`, also trains and evaluates a reference model on all `prune.cfg.num_samples` samples. Defaults to `false`. |
 | `prune` | object | Pruning config and parameters. |
 | `sft` | object | Fine-tuning config and parameters. |
 | `eval` | object | Evaluation config and parameters. |
@@ -192,6 +193,7 @@ title: debug
 output_dir: debugging
 seeds: [3, 4]
 debug_mode: true
+full_data_reference: false
 prune:
   cfg:
     prune_model_id: google/gemma-3-270m-it

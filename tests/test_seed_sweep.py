@@ -54,6 +54,53 @@ class SeedSweepTests(unittest.TestCase):
         self.assertEqual(suite.seeds, [3, 7])
         self.assertEqual(suite.for_seed(7).seed, 7)
 
+    def test_full_data_reference_is_top_level_and_changes_reference_sizes(self):
+        config = {
+            "title": "test",
+            "output_dir": "output",
+            "seeds": [3],
+            "prune": {
+                "cfg": {
+                    "prune_model_id": "prune-model",
+                    "sae_release": "release",
+                    "sae_id": "sae",
+                    "dataset_id": "dataset",
+                    "num_samples": 10,
+                    "seq_agg_method": "mean",
+                    "feat_agg_method": "mean",
+                    "divide_by_entropy": False,
+                },
+                "params": {"batch_size": 1, "dataset_sizes": [2], "topk_features": [1]},
+            },
+            "sft": {
+                "cfg": {
+                    "max_seq_length": 16,
+                    "learning_rate": 1e-4,
+                    "lr_scheduler_type": "cosine",
+                    "tokenizer_id": "tokenizer",
+                    "base_model_id": "model",
+                    "full_ft": False,
+                },
+                "params": {"batch_size": 1},
+            },
+            "eval": {"cfg": {}, "params": {"batch_size": 1}},
+        }
+        suite = SuiteConfig(**config)
+        full_suite = suite.model_copy(update={"full_data_reference": True})
+
+        self.assertFalse(suite.full_data_reference)
+        self.assertEqual(suite.reference_dataset_sizes, [2])
+        self.assertEqual(full_suite.reference_dataset_sizes, [2, 10])
+        self.assertNotEqual(suite.ids.experiment, full_suite.ids.experiment)
+
+    def test_full_data_reference_does_not_duplicate_existing_size(self):
+        config_path = Path("configs/debug.yaml")
+        suite = SuiteConfig.from_yaml(config_path).model_copy(
+            update={"full_data_reference": True}
+        )
+
+        self.assertEqual(suite.reference_dataset_sizes, [2])
+
     def test_seed_paths_are_distinct(self):
         config_path = Path("configs/debug.yaml")
         suite = SuiteConfig.from_yaml(config_path)

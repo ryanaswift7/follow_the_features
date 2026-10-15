@@ -80,7 +80,7 @@ def aggregate_results(suite: SuiteConfig) -> pd.DataFrame:
         }
         rows.append(base_data)
 
-    for n in suite.prune.params.dataset_sizes:
+    for n in suite.reference_dataset_sizes:
         ref_data = load_json_safe(
             suite.dirs.reference_model_summary_eval(n) / EVAL_RESULTS_FILENAME
         )
@@ -177,7 +177,7 @@ def write_manifest(suite: SuiteConfig, results_df: pd.DataFrame) -> Path:
             }
         )
 
-    for dataset_size in suite.prune.params.dataset_sizes:
+    for dataset_size in suite.reference_dataset_sizes:
         reference_row = find_row(ModelType.REFERENCE.value, dataset_size=dataset_size)
         if reference_row is None:
             continue

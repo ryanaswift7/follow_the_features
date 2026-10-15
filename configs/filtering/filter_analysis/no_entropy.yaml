@@ -1,7 +1,8 @@
-title: filter_sweep_targeted_pt2
+title: no_entropy
 output_dir: filter_experiments
 seeds: [6, 7, 67]
 debug_mode: false
+# full_data_reference: true
 prune:
   cfg:
     prune_model_id: google/gemma-3-12b-it
@@ -11,26 +12,26 @@ prune:
     num_samples: 51760
     seq_agg_method: last_token
     feat_agg_method: mean
-    divide_by_entropy: true
+    divide_by_entropy: false
     diversity_param: 0.2
   params:
     batch_size: 32
     dataset_sizes:
     # - 10
-    # - 100
+    - 100
     # - 500
     # - 1000
     # - 5000
-    - 10000
+    # - 10000
     # - 51760
     topk_features:
     # - 1
-    # - 5
+    - 5
     # - 10
     # - 50
-    - 100
+    # - 100
     # - 150
-    - 200
+    # - 200
 sft:
   cfg:
     tokenizer_id: HuggingFaceTB/SmolLM3-3B
