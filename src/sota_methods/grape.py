@@ -1,4 +1,6 @@
 import gc
+import logging
+import time
 from src.prune import convert_alpaca_to_messages, get_formatting_function
 import torch
 import numpy as np
@@ -11,6 +13,9 @@ import multiprocessing as mp
 from tqdm.auto import tqdm
 
 
+logger = logging.getLogger(__name__)
+
+
 def format_grape_prompt(tokenizer, instruction):
     if tokenizer.chat_template:
         return tokenizer.apply_chat_template(
@@ -21,7 +26,14 @@ def format_grape_prompt(tokenizer, instruction):
     return f"Question: {instruction}\nAnswer: "
 
 
-def select_grape_responses(model, tokenizer, candidates, budget, batch_size=1):
+def select_grape_responses(
+    model,
+    tokenizer,
+    candidates,
+    budget,
+    batch_size=1,
+    max_length=None,
+):
     """Select one highest normalized-probability response per instruction.
 
     ``candidates`` is a sequence of dictionaries with ``instruction`` and a
@@ -36,41 +48,135 @@ def select_grape_responses(model, tokenizer, candidates, budget, batch_size=1):
         )
     if budget < 0:
         raise ValueError("GRAPE budget must be non-negative")
+    if batch_size < 1:
+        raise ValueError("GRAPE scoring batch_size must be positive")
+    if max_length is not None and max_length < 1:
+        raise ValueError("GRAPE scoring max_length must be positive")
 
     device = next(model.parameters()).device
-    scored = []
+    original_padding_side = tokenizer.padding_side
+    original_pad_token = tokenizer.pad_token
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token is None:
+            raise ValueError("GRAPE scoring tokenizer must define a pad_token or eos_token")
+        tokenizer.pad_token = tokenizer.eos_token
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = tokenizer.eos_token_id
+    if pad_token_id is None:
+        raise ValueError("GRAPE scoring tokenizer must define a pad_token_id or eos_token_id")
+    tokenizer.padding_side = "right"
+    total_responses = sum(len(item["responses"]) for item in candidates)
+    if not total_responses:
+        tokenizer.padding_side = original_padding_side
+        tokenizer.pad_token = original_pad_token
+        raise ValueError("GRAPE candidate pool contains no responses to score")
+
+    scores = [[] for _ in candidates]
     model.eval()
-    with torch.no_grad():
-        for start in range(0, len(candidates), batch_size):
-            batch = candidates[start : start + batch_size]
-            prompts = [
-                format_grape_prompt(tokenizer, item["instruction"])
-                for item in batch
-            ]
-            for item, prompt in zip(batch, prompts):
-                prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-                response_scores = []
-                for response in item["responses"]:
-                    full = tokenizer(
-                        prompt + response,
-                        add_special_tokens=False,
-                        return_tensors="pt",
+    started = time.perf_counter()
+    progress = tqdm(
+        total=total_responses,
+        desc="GRAPE tokenization/scoring",
+        unit="response",
+    )
+
+    def score_batch(batch):
+        width = max(len(record["input_ids"]) for record in batch)
+        input_ids = torch.tensor(
+            [
+                record["input_ids"] + [pad_token_id] *
+                (width - len(record["input_ids"]))
+                for record in batch
+            ],
+            device=device,
+        )
+        attention_mask = torch.tensor(
+            [
+                [1] * len(record["input_ids"])
+                + [0] * (width - len(record["input_ids"]))
+                for record in batch
+            ],
+            device=device,
+        )
+        lengths = attention_mask.sum(dim=1)
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits[..., :-1, :]
+        labels = input_ids[..., 1:]
+        token_logprobs = torch.gather(
+            torch.log_softmax(logits, dim=-1),
+            -1,
+            labels.unsqueeze(-1),
+        ).squeeze(-1)
+
+        positions = torch.arange(token_logprobs.shape[1], device=device).unsqueeze(0)
+        batch_prompt_lengths = torch.tensor(
+            [record["prompt_length"] for record in batch],
+            device=device,
+        )
+        response_mask = (
+            (positions >= (batch_prompt_lengths - 1).unsqueeze(1))
+            & (positions < (lengths - 1).unsqueeze(1))
+        )
+        response_counts = response_mask.sum(dim=1)
+        batch_scores = (
+            (token_logprobs * response_mask).sum(dim=1)
+            / response_counts.clamp_min(1)
+        )
+        batch_scores = batch_scores.masked_fill(response_counts == 0, float("-inf"))
+        for record, score in zip(batch, batch_scores.tolist()):
+            scores[record["item_index"]].append((record["response_index"], score))
+
+    try:
+        logger.info(
+            "GRAPE streaming %s responses in minibatches of up to %s "
+            "(%s tokens per prompt/response segment)",
+            total_responses,
+            batch_size,
+            max_length or "unlimited",
+        )
+        with torch.inference_mode():
+            batch = []
+            for item_index, item in enumerate(candidates):
+                prompt = format_grape_prompt(tokenizer, item["instruction"])
+                full_prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+                prompt_ids = full_prompt_ids[:max_length] if max_length is not None else full_prompt_ids
+                for response_index, response in enumerate(item["responses"]):
+                    full_ids = tokenizer(prompt + response, add_special_tokens=False)["input_ids"]
+                    response_ids = full_ids[len(full_prompt_ids):]
+                    if max_length is not None:
+                        response_ids = response_ids[:max_length]
+                    batch.append(
+                        {
+                            "item_index": item_index,
+                            "response_index": response_index,
+                            "prompt_length": len(prompt_ids),
+                            "input_ids": prompt_ids + response_ids,
+                        }
                     )
-                    inputs = {key: value.to(device) for key, value in full.items()}
-                    logits = model(**inputs).logits[0, :-1]
-                    labels = inputs["input_ids"][0, 1:]
-                    logprobs = torch.log_softmax(logits, dim=-1)
-                    token_logprobs = torch.gather(
-                        logprobs, -1, labels.unsqueeze(-1)
-                    ).squeeze(-1)
-                    response_logprobs = token_logprobs[len(prompt_ids) - 1 :]
-                    response_scores.append(
-                        response_logprobs.mean().item()
-                        if response_logprobs.numel()
-                        else float("-inf")
-                    )
-                best = int(np.argmax(response_scores))
-                scored.append({**item, "score": response_scores[best], "best": best})
+                    if len(batch) == batch_size:
+                        score_batch(batch)
+                        progress.update(len(batch))
+                        batch = []
+            if batch:
+                score_batch(batch)
+                progress.update(len(batch))
+    finally:
+        progress.close()
+        tokenizer.padding_side = original_padding_side
+        tokenizer.pad_token = original_pad_token
+
+    scored = []
+    for item, response_scores in zip(candidates, scores):
+        best, best_score = max(response_scores, key=lambda pair: pair[1])
+        scored.append({**item, "score": best_score, "best": best})
+
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "GRAPE scoring complete: %s responses in %.2fs (%.2f responses/s)",
+        total_responses,
+        elapsed,
+        total_responses / max(elapsed, 1e-6),
+    )
 
     scored.sort(key=lambda item: item["score"], reverse=True)
     return [

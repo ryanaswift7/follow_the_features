@@ -32,11 +32,76 @@ Or use a larger config such as:
 uv run fdp --config configs/base_full_gemma3.yaml
 ```
 
-Run a direct GRAPE/S2L comparison with a separate SOTA configuration:
+## SOTA Comparisons
+
+Run the checked-in Ultrachat and Alpaca GRAPE/S2L comparisons:
 
 ```bash
-uv run grape-s2l -c configs/methodology.yaml -s configs/sota/sota.yaml
+bash scripts/sota/main_results_sota.sh
 ```
+
+Run one comparison directly:
+
+```bash
+uv run grape-s2l \
+  -c configs/filtering/llama_ultrachat_100_1k.yaml \
+  -s configs/sota/llama_ultrachat_100_1k.yaml
+```
+
+The main suite config supplies the target model, SFT/evaluation settings, and
+comparison budgets from `prune.params.dataset_sizes`. The SOTA config supplies
+the dataset, methods, proxies, and output directory. Its main fields are:
+
+```yaml
+dataset_id: HuggingFaceH4/ultrachat_200k
+split: train_sft
+seeds: [6, 7, 67]
+output_dir: sota_results/llama_ultrachat_100_1k
+grape:
+  teacher_ids: []
+  max_tokens: 256
+  temperature: 0.7
+  batch_size: 32
+s2l:
+  proxy_model_id: meta-llama/Llama-3.2-1B
+  proxy_tokenizer_id: meta-llama/Llama-3.2-1B-Instruct
+  trajectory_checkpoints: [1000, 2000, 3000]
+  n_clusters: 100
+```
+
+If `seeds` is omitted, all seeds from the main suite config are used. If it is
+provided, every seed must be present in the main config. GRAPE candidate
+generation and scoring, S2L proxy training and trajectory inference, final SFT,
+and evaluation all run independently for each requested seed.
+
+GRAPE always includes original dataset responses. An empty `teacher_ids` list
+runs original-response-only GRAPE. `grape.batch_size` is the response-level
+scoring minibatch size. Prompt and response scoring segments are each capped at
+the main config's `sft.cfg.max_seq_length`.
+
+SOTA runs are stored in a hash-specific subdirectory of `output_dir`. The run
+directory contains copies of both input configs and a `run_manifest.json`.
+Completed stages can be reused after a crash. Results are organized as:
+
+```text
+<output_dir>/config-<hash>/
+  suite_config.yaml
+  sota_config.yaml
+  run_manifest.json
+  seeds/seed_6/
+    comparison.json
+    datasets/
+    models/
+  seeds/seed_7/
+    ...
+  comparison_by_seed.json
+  comparison.json
+```
+
+`comparison_by_seed.json` and the per-seed `comparison.json` files retain raw
+seed results. The top-level `comparison.json` contains averaged numeric metrics
+across the requested seeds. Changing either config creates a new hash-specific
+run directory instead of invalidating an existing run.
 
 Create and push a reproducible 100,000-example subset of
 `allenai/Dolci-Instruct-SFT-No-Tools`:

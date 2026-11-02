@@ -1,0 +1,14 @@
+dataset_id: yahma/alpaca-cleaned
+split: train
+seeds: [7, 67]  # [6, 7, 67]
+output_dir: sota_results/qwen_alpaca_100_1k
+grape:
+  teacher_ids: []
+  max_tokens: 256
+  temperature: 0.7
+  batch_size: 32
+s2l:
+  proxy_model_id: Qwen/Qwen3-0.6B-Base
+  proxy_tokenizer_id: Qwen/Qwen3-0.6B
+  trajectory_checkpoints: [1000, 2000, 3000]
+  n_clusters: 100

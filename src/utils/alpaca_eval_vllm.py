@@ -58,7 +58,7 @@ def vllm_local_completions(
             for prompt in prompts
         ]
 
-    outputs = _llm.generate(prompts, sampling_params)
+    outputs = _llm.generate(prompts, sampling_params, use_tqdm=True)
     completions = [output.outputs[0].text for output in outputs]
     return {
         "completions": completions,

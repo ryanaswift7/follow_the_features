@@ -13,6 +13,7 @@ from pathlib import Path
 import faiss
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 
 def allocate_s2l_indices(
@@ -151,7 +152,9 @@ def collect_checkpoint_trajectories(
     encoded = [_encode_messages(tokenizer, item["messages"], max_length) for item in dataset]
     trajectories = torch.empty((len(encoded), len(checkpoint_paths)), dtype=torch.float32)
 
-    for checkpoint_index, checkpoint_path in enumerate(checkpoint_paths):
+    for checkpoint_index, checkpoint_path in enumerate(
+        tqdm(checkpoint_paths, desc="S2L trajectory checkpoints", unit="checkpoint")
+    ):
         state_path = Path(checkpoint_path) / "model_state.pt"
         if not state_path.exists():
             raise FileNotFoundError(
@@ -160,7 +163,14 @@ def collect_checkpoint_trajectories(
         state = torch.load(state_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state, strict=True)
         model.to(device).eval()
-        for start in range(0, len(encoded), batch_size):
+        batches = range(0, len(encoded), batch_size)
+        for start in tqdm(
+            batches,
+            total=(len(encoded) + batch_size - 1) // batch_size,
+            desc=f"S2L inference {checkpoint_index + 1}/{len(checkpoint_paths)}",
+            unit="batch",
+            leave=False,
+        ):
             batch = _collate(encoded[start : start + batch_size], tokenizer)
             batch = {key: value.to(device) for key, value in batch.items()}
             with torch.no_grad():

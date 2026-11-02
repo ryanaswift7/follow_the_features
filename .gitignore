@@ -39,3 +39,6 @@ sota_eval_logs/
 llama_ultrachat/
 olmo_dolci/
 qwen_alpaca/
+sota_results/
+feature_ranking_correlation/
+feature_ranking_correlation.old/

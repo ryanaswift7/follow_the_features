@@ -1,6 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
-uv run fdp -c configs/filtering/filter_analysis/mean_seq_agg.yaml
-uv run fdp -c configs/filtering/filter_analysis/no_diversity_resample.yaml
-uv run fdp -c configs/filtering/filter_analysis/no_entropy.yaml
-uv run fdp -c configs/filtering/filter_analysis/superfiltering.yaml
+bash scripts/filtering/ablations_superfilter_feat_corr.sh
+bash scripts/filtering/lr_agg_full_ft.sh
