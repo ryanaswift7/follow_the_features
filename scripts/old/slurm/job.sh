@@ -18,4 +18,4 @@ echo "Building environment in $SLURM_TMPDIR..."
 uv sync
 
 echo "Starting experiment..."
-uv run fdp -c configs/llama_662_slurm.yaml
+uv run ftf -c configs/llama_662_slurm.yaml

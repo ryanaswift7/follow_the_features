@@ -1,5 +1,5 @@
 [project]
-name = "feature-data-pruning"
+name = "follow-the-features"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -39,7 +39,7 @@ explicit = true
 # torchaudio = { index = "pytorch-cu128" }
 
 [project.scripts]
-fdp = "src.main:main"
+ftf = "src.main:main"
 gen-ref-models = "src.reference_models:main"
 gen-sni-data = "src.utils.sni_data_gen:main"
 gen-dolci-subset = "src.utils.dolci_subset:main"

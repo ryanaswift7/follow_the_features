@@ -16,7 +16,7 @@ for c in "${configs[@]}"; do
     
     if [ -f "$file" ]; then
         echo "--- Running FDP with $file ---"
-        uv run fdp -c "$file"
+        uv run ftf -c "$file"
     else
         echo "Warning: $file not found."
     fi

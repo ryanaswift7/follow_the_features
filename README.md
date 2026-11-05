@@ -1,8 +1,24 @@
-# Feature Data Pruning
+# Follow the Features
 
-A pruning and retraining pipeline for selecting training examples with SAE activations, then fine-tuning and evaluating the resulting model variants.
+A data filtering methodology for selecting training examples with SAE feature activations, then fine-tuning and evaluating the resulting model variants.
 
-The main entrypoint is `fdp` from `src.main:main`.
+The main entrypoint is `ftf` from `src.main:main`.
+
+## Paper
+
+This repository accompanies [*Follow the Features: SAE Feature-Guided Data-Efficient Instruction-Tuning of Large Language Models*](https://arxiv.org/abs/2611.04085).
+
+```bibtex
+@misc{swift2026follow,
+  title         = {Follow the Features: SAE Feature-Guided Data-Efficient Instruction-Tuning of Large Language Models},
+  author        = {Swift, Ryan and Psounis, Konstantinos},
+  year          = {2026},
+  eprint        = {2611.04085},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  doi           = {10.48550/arXiv.2611.04085}
+}
+```
 
 ## What the pipeline does
 
@@ -23,13 +39,7 @@ uv sync
 Run an experiment suite:
 
 ```bash
-uv run fdp --config configs/debug.yaml
-```
-
-Or use a larger config such as:
-
-```bash
-uv run fdp --config configs/base_full_gemma3.yaml
+uv run ftf --config configs/debug.yaml
 ```
 
 ## SOTA Comparisons
@@ -103,6 +113,16 @@ seed results. The top-level `comparison.json` contains averaged numeric metrics
 across the requested seeds. Changing either config creates a new hash-specific
 run directory instead of invalidating an existing run.
 
+Convert an averaged SOTA comparison to a CSV in a format similar to the main
+pipeline results:
+
+```bash
+uv run convert-sota-comparison path/to/comparison.json
+```
+
+By default, the command writes `comparison.csv` beside the input JSON. Pass
+`--output path/to/results.csv` to choose a different output path.
+
 Create and push a reproducible 100,000-example subset of
 `allenai/Dolci-Instruct-SFT-No-Tools`:
 
@@ -129,6 +149,19 @@ selects at most one response per unique instruction and fails if a requested
 budget is larger than that instruction count. The SOTA configuration specifies
 the dataset, GRAPE teachers, one canonical S2L proxy, trajectory checkpoints,
 and the S2L cluster count.
+
+## Feature Rank Correlations
+
+Compare feature rankings using the configured report paths:
+
+```bash
+uv run feature-rank-correlation --config configs/feature_corr/ultrachat_alpaca.yaml
+```
+
+When reproducing these experiments, generate the feature reports at the paths
+listed in that config before running the correlation command. It compares the
+rankings at the configured `top_k_values` and writes CSV and Markdown results
+under `feature_ranking_correlation/` by default.
 
 ## Repository Layout
 
@@ -321,4 +354,4 @@ The pruning stage also writes dataset metadata files so later runs can verify co
 ## Notes
 
 - The project expects Python 3.13 or newer.
-- The repo defines CLI scripts in `pyproject.toml`, including `fdp`, `gen-ref-models`, `gen-sni-data`, and `sota-comps`.
+- The repo defines CLI scripts in `pyproject.toml`, including `ftf`, `gen-ref-models`, `gen-sni-data`, and `sota-comps`.

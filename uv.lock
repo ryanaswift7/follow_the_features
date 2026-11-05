@@ -1012,55 +1012,6 @@ wheels = [
 ]
 
 [[package]]
-name = "feature-data-pruning"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "alpaca-eval" },
-    { name = "datasets" },
-    { name = "evaluate" },
-    { name = "faiss-cpu" },
-    { name = "immutabledict" },
-    { name = "langdetect" },
-    { name = "lm-eval", extra = ["ifeval", "math", "sentencepiece"] },
-    { name = "matplotlib" },
-    { name = "peft" },
-    { name = "pillow" },
-    { name = "pydantic" },
-    { name = "pytest" },
-    { name = "pyyaml" },
-    { name = "rouge-score" },
-    { name = "sae-lens" },
-    { name = "seaborn" },
-    { name = "tabulate" },
-    { name = "trl" },
-    { name = "vllm" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alpaca-eval", specifier = "==0.6.6" },
-    { name = "datasets", specifier = ">=4.0.0" },
-    { name = "evaluate", specifier = ">=0.4.6" },
-    { name = "faiss-cpu", specifier = ">=1.13.2" },
-    { name = "immutabledict", specifier = ">=4.3.1" },
-    { name = "langdetect", specifier = ">=1.0.9" },
-    { name = "lm-eval", extras = ["ifeval", "math", "sentencepiece"], specifier = ">=0.4.11" },
-    { name = "matplotlib" },
-    { name = "peft", specifier = ">=0.18.1" },
-    { name = "pillow", specifier = ">=12.1.0" },
-    { name = "pydantic" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "pyyaml" },
-    { name = "rouge-score", specifier = ">=0.1.2" },
-    { name = "sae-lens", specifier = ">=6.30.0" },
-    { name = "seaborn", specifier = ">=0.13.2" },
-    { name = "tabulate", specifier = ">=0.9.0" },
-    { name = "trl", specifier = ">=0.27.0" },
-    { name = "vllm", specifier = "==0.19.1" },
-]
-
-[[package]]
 name = "filelock"
 version = "3.29.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1111,6 +1062,55 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/03/70/c5a235297351021f5d3d3233523a85f5a6468495587489ad2f257e8eafe2/flashinfer_python-0.6.6.tar.gz", hash = "sha256:0730ba7c7aad332961933bcebc5119762797161ede57d955f6fd199818ed1d92", size = 5344156, upload-time = "2026-03-11T01:36:21.434Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/61/385d06755f3ab66333018285657adf0daf8a90a129448231fd09e315bd2e/flashinfer_python-0.6.6-py3-none-any.whl", hash = "sha256:078f158636969eec1a0d3dea19c3ca90b426b66df89bbf7b7b8276ce2ec08148", size = 7817047, upload-time = "2026-03-11T01:36:19.198Z" },
+]
+
+[[package]]
+name = "follow-the-features"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "alpaca-eval" },
+    { name = "datasets" },
+    { name = "evaluate" },
+    { name = "faiss-cpu" },
+    { name = "immutabledict" },
+    { name = "langdetect" },
+    { name = "lm-eval", extra = ["ifeval", "math", "sentencepiece"] },
+    { name = "matplotlib" },
+    { name = "peft" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "pytest" },
+    { name = "pyyaml" },
+    { name = "rouge-score" },
+    { name = "sae-lens" },
+    { name = "seaborn" },
+    { name = "tabulate" },
+    { name = "trl" },
+    { name = "vllm" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alpaca-eval", specifier = "==0.6.6" },
+    { name = "datasets", specifier = ">=4.0.0" },
+    { name = "evaluate", specifier = ">=0.4.6" },
+    { name = "faiss-cpu", specifier = ">=1.13.2" },
+    { name = "immutabledict", specifier = ">=4.3.1" },
+    { name = "langdetect", specifier = ">=1.0.9" },
+    { name = "lm-eval", extras = ["ifeval", "math", "sentencepiece"], specifier = ">=0.4.11" },
+    { name = "matplotlib" },
+    { name = "peft", specifier = ">=0.18.1" },
+    { name = "pillow", specifier = ">=12.1.0" },
+    { name = "pydantic" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pyyaml" },
+    { name = "rouge-score", specifier = ">=0.1.2" },
+    { name = "sae-lens", specifier = ">=6.30.0" },
+    { name = "seaborn", specifier = ">=0.13.2" },
+    { name = "tabulate", specifier = ">=0.9.0" },
+    { name = "trl", specifier = ">=0.27.0" },
+    { name = "vllm", specifier = "==0.19.1" },
 ]
 
 [[package]]
